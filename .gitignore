@@ -1,0 +1,8 @@
+# Docs (internal only, not for commit)
+Tempo Off-Chain Payment & Encrypted Messaging Network — Technical Architecture.pdf
+contracts/DESIGN.md
+
+# Foundry
+contracts/cache/
+contracts/out/
+contracts/broadcast/*/31337/
