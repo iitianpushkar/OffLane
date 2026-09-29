@@ -230,6 +230,7 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         ch.authorizedSignerA = intent.authorizedSignerA;
         ch.authorizedSignerB = intent.authorizedSignerB;
         ch.status = Status.PENDING;
+        ch.balanceA = intent.depositA;
         // ch.nonce, ch.balanceB, ch.challengeExpireAt default to 0
 
         if (intent.depositA > 0) {
@@ -244,7 +245,6 @@ contract ChannelManager is EIP712, ReentrancyGuard {
                 revert TransferFailed();
             }
         }
-        ch.balanceA = intent.depositA;
 
         emit ChannelOpened(
             channelId,
@@ -271,6 +271,7 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         }
 
         ch.status = Status.OPEN;
+        ch.balanceB = intent.depositB;
 
         if (intent.depositB > 0) {
             // Same reasoning as in openChannel: `from` is `intent.participantB`,
@@ -281,7 +282,6 @@ contract ChannelManager is EIP712, ReentrancyGuard {
                 revert TransferFailed();
             }
         }
-        ch.balanceB = intent.depositB;
 
         emit ChannelJoined(channelId, intent.depositB);
     }
