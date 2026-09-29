@@ -3,9 +3,20 @@ pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 import {ChannelManager} from "../src/ChannelManager.sol";
+import {IReceivePolicyGuard} from "../src/interfaces/IReceivePolicyGuard.sol";
 import {MockTIP20} from "./mocks/MockTIP20.sol";
 
 contract ChannelManagerTest is Test {
+    // Real Tempo system precompiles. Foundry's `tempo = true` profile
+    // (see foundry.toml) emulates these for real in the local test EVM —
+    // confirmed by observation: TIP-1020 signature recovery/comparison
+    // works correctly with no mock or vm.etch at all, and an unmocked call
+    // to ReceivePolicyGuard rejects an unknown selector rather than acting
+    // like an empty address. So tests below exercise the real precompiles
+    // directly rather than a stand-in.
+    address internal constant SIGNATURE_VERIFIER_ADDR = 0x5165300000000000000000000000000000000000;
+    address internal constant RECEIVE_POLICY_GUARD_ADDR = 0xB10C000000000000000000000000000000000000;
+
     ChannelManager internal manager;
     MockTIP20 internal token;
 
@@ -254,6 +265,82 @@ contract ChannelManagerTest is Test {
         // Bob's slot is filled with Alice's signature again — not a valid signature from Bob.
         vm.expectRevert(ChannelManager.InvalidSignature.selector);
         manager.cooperativeClose(state, sigA, sigA);
+    }
+
+    // ------------------------------------------------------------------
+    // TIP-403 receive-policy blocking + rescue
+    // ------------------------------------------------------------------
+
+    function test_Payout_BlockedByReceivePolicy_IsTrackedNotLost() public {
+        (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 41);
+
+        token.setBlocked(bob, true);
+
+        ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 1, balanceA: 100e6, balanceB: 100e6, appDataHash: bytes32(0)
+        });
+        manager.cooperativeClose(state, _signState(state, alicePk), _signState(state, bobPk));
+
+        // Alice, unaffected, is paid normally.
+        assertEq(token.balanceOf(alice), 900e6 + 100e6, "alice paid normally");
+        // Bob's payout was redirected, not delivered, but not lost either.
+        assertEq(token.balanceOf(bob), 900e6, "bob did not receive tokens directly");
+        assertEq(manager.getBlockedPayout(channelId, bob), 100e6, "blocked amount tracked");
+        assertEq(token.balanceOf(RECEIVE_POLICY_GUARD_ADDR), 100e6, "funds sitting at the guard");
+    }
+
+    /// @dev A fabricated receipt can never actually be rescued in this test
+    /// environment: ChannelManager's `rescueBlockedPayout` calls the REAL
+    /// ReceivePolicyGuard precompile (Foundry's `tempo = true` mode emulates
+    /// it faithfully — see the constants comment above), and the real guard
+    /// has no balance recorded for a receipt that wasn't created by a real
+    /// TIP-403-policy-respecting TIP-20 token (MockTIP20 only simulates the
+    /// symptom, not the real blocking mechanism). So this test only proves
+    /// the parts of `rescueBlockedPayout` that don't depend on that: the
+    /// authorization gate, and that it correctly reverts rather than
+    /// silently succeeding when the real guard has nothing to release. A
+    /// full block-then-claim round trip needs a Moderato testnet run with a
+    /// real TIP-20 token and a configured receive policy.
+    function test_RescueBlockedPayout_AuthorizationGateAndNoRealReceiptToClaim() public {
+        (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 42);
+
+        token.setBlocked(bob, true);
+        ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 1, balanceA: 100e6, balanceB: 100e6, appDataHash: bytes32(0)
+        });
+        manager.cooperativeClose(state, _signState(state, alicePk), _signState(state, bobPk));
+        assertEq(manager.getBlockedPayout(channelId, bob), 100e6);
+
+        bytes memory fabricatedReceipt = abi.encode(
+            IReceivePolicyGuard.ClaimReceiptV1({
+                version: 1,
+                token: address(token),
+                recoveryAuthority: address(0),
+                originator: address(manager),
+                recipient: bob,
+                blockedAt: uint64(block.timestamp),
+                blockedNonce: 1,
+                blockedReason: IReceivePolicyGuard.BlockedReason.RECEIVE_POLICY,
+                kind: IReceivePolicyGuard.InboundKind.TRANSFER,
+                memo: bytes32(0)
+            })
+        );
+
+        // A stranger cannot redirect Bob's funds elsewhere — rejected before
+        // the real guard is ever called.
+        address bobsOtherWallet = makeAddr("bobsOtherWallet");
+        vm.expectRevert(ChannelManager.NotAuthorizedToRedirect.selector);
+        manager.rescueBlockedPayout(channelId, address(token), fabricatedReceipt, bobsOtherWallet);
+
+        // Bob (or a permissionless keeper rescuing to Bob himself) passes
+        // our own authorization gate, but the real guard has no balance for
+        // a receipt that was never genuinely created there — must revert,
+        // not silently report success while delivering nothing.
+        vm.expectRevert();
+        manager.rescueBlockedPayout(channelId, address(token), fabricatedReceipt, bob);
+
+        // Our own bookkeeping is untouched by the failed attempt.
+        assertEq(manager.getBlockedPayout(channelId, bob), 100e6);
     }
 
     function test_RevertWhen_OpeningSameIntentTwice() public {

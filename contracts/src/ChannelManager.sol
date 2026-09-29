@@ -2,9 +2,10 @@
 pragma solidity 0.8.26;
 
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {ITIP20} from "./interfaces/ITIP20.sol";
+import {ITempoSignatureVerifier} from "./interfaces/ITempoSignatureVerifier.sol";
+import {IReceivePolicyGuard} from "./interfaces/IReceivePolicyGuard.sol";
 
 /// @title ChannelManager
 /// @notice Two-party, bidirectional, collateralized state-channel contract for
@@ -41,6 +42,14 @@ contract ChannelManager is EIP712, ReentrancyGuard {
     uint8 public constant PROTOCOL_VERSION = 1;
     uint32 public constant MIN_CHALLENGE_DURATION = 1 hours;
     uint32 public constant MAX_CHALLENGE_DURATION = 30 days;
+
+    /// @dev Tempo's TIP-1020 signature-verification precompile (https://tips.sh/1020).
+    ITempoSignatureVerifier internal constant SIGNATURE_VERIFIER =
+        ITempoSignatureVerifier(0x5165300000000000000000000000000000000000);
+
+    /// @dev Tempo's ReceivePolicyGuard (https://tips.sh/1028), fixed system address.
+    IReceivePolicyGuard internal constant RECEIVE_POLICY_GUARD =
+        IReceivePolicyGuard(0xB10C000000000000000000000000000000000000);
 
     bytes32 private constant CHANNEL_INTENT_TYPEHASH = keccak256(
         "ChannelIntent(uint8 protocolVersion,address participantA,address participantB,address token,uint128 depositA,uint128 depositB,uint32 challengeDuration,uint32 validUntil,address authorizedSignerA,address authorizedSignerB,uint256 salt)"
@@ -116,6 +125,12 @@ contract ChannelManager is EIP712, ReentrancyGuard {
 
     mapping(bytes32 channelId => Channel) private _channels;
 
+    /// @dev Tracks payouts that a TIP-403 receive policy redirected to
+    /// ReceivePolicyGuard instead of delivering, so they're never silently
+    /// lost. Cleared once `rescueBlockedPayout` successfully claims them.
+    /// Survives channel deletion — keyed independently of `_channels`.
+    mapping(bytes32 channelId => mapping(address participant => uint128 amount)) private _blockedPayouts;
+
     // =========================================================================
     //                                 Events
     // =========================================================================
@@ -139,6 +154,10 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         bytes32 indexed channelId, uint64 nonce, uint128 balanceA, uint128 balanceB, uint64 challengeExpireAt
     );
     event ChannelSettled(bytes32 indexed channelId, uint128 payoutA, uint128 payoutB);
+    event PayoutBlocked(bytes32 indexed channelId, address indexed participant, address token, uint128 amount);
+    event BlockedPayoutRescued(
+        bytes32 indexed channelId, address indexed participant, address token, uint256 amount, address to
+    );
 
     // =========================================================================
     //                                 Errors
@@ -161,6 +180,9 @@ contract ChannelManager is EIP712, ReentrancyGuard {
     error ChallengeWindowActive();
     error ChallengeWindowExpired();
     error TransferFailed();
+    error ReceiptMismatch();
+    error NotAuthorizedToRedirect();
+    error NoBlockedPayout();
 
     // =========================================================================
     //                               Constructor
@@ -279,9 +301,7 @@ contract ChannelManager is EIP712, ReentrancyGuard {
 
         delete _channels[channelId];
 
-        if (refund > 0) {
-            if (!ITIP20(token).transfer(participantA, refund)) revert TransferFailed();
-        }
+        _payout(token, participantA, refund, channelId);
 
         emit ChannelCancelled(channelId);
     }
@@ -373,6 +393,13 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         return _computeChannelId(intent);
     }
 
+    /// @notice Amount still owed to `participant` from `channelId` that was
+    /// redirected to ReceivePolicyGuard rather than delivered directly. See
+    /// `rescueBlockedPayout`.
+    function getBlockedPayout(bytes32 channelId, address participant) external view returns (uint128) {
+        return _blockedPayouts[channelId][participant];
+    }
+
     // =========================================================================
     //                                Internal
     // =========================================================================
@@ -416,23 +443,100 @@ contract ChannelManager is EIP712, ReentrancyGuard {
 
         delete _channels[channelId];
 
-        if (payoutA > 0) {
-            if (!ITIP20(token).transfer(participantA, payoutA)) revert TransferFailed();
-        }
-        if (payoutB > 0) {
-            if (!ITIP20(token).transfer(participantB, payoutB)) revert TransferFailed();
-        }
+        _payout(token, participantA, payoutA, channelId);
+        _payout(token, participantB, payoutB, channelId);
 
         emit ChannelSettled(channelId, payoutA, payoutB);
     }
 
+    /// @dev Sends `amount` of `token` to `to`, but does not blindly trust a
+    /// truthy return value as proof of delivery: a TIP-403 receive policy on
+    /// `to` can make the TIP-20 call return `true` while silently
+    /// redirecting the funds to Tempo's ReceivePolicyGuard instead
+    /// (https://tips.sh/1028). Comparing `to`'s balance before/after detects
+    /// that redirect; any shortfall is tracked in `_blockedPayouts` instead
+    /// of being lost, and can later be claimed back via
+    /// `rescueBlockedPayout` once the receipt is known (by indexing the
+    /// token's `TransferBlocked` event) — this contract is very likely the
+    /// authorized claimer, since it's the `transfer` call's `msg.sender`
+    /// (the receipt's `originator`), and most receivers never configure a
+    /// receive policy's recovery authority away from that default.
+    /// @dev The `_blockedPayouts` write below necessarily happens after the
+    /// external `transfer` call — the whole point is recording what that
+    /// call's *outcome* was, so the write can't be reordered ahead of it the
+    /// way a plain CEI pattern would. This is safe from reentrancy because
+    /// every caller of `_payout` (`_settle`, `cancelUnjoined`) is reached
+    /// only through a `nonReentrant`-guarded external function, so no
+    /// callback during `transfer` can re-enter any state-changing function
+    /// on this contract regardless of call ordering within `_payout` itself.
+    function _payout(address token, address to, uint128 amount, bytes32 channelId) internal {
+        if (amount == 0) return;
+
+        uint256 balBefore = ITIP20(token).balanceOf(to);
+        if (!ITIP20(token).transfer(to, amount)) revert TransferFailed();
+        uint256 delivered = ITIP20(token).balanceOf(to) - balBefore;
+
+        if (delivered < amount) {
+            // Safe: delivered < amount <= type(uint128).max here.
+            // forge-lint: disable-next-line(unsafe-typecast)
+            uint128 blocked = amount - uint128(delivered);
+            _blockedPayouts[channelId][to] += blocked;
+            emit PayoutBlocked(channelId, to, token, blocked);
+        }
+    }
+
+    /// @notice Claims a payout that was redirected to ReceivePolicyGuard
+    /// (see `_payout`) back for the affected participant. `receipt` is the
+    /// ABI-encoded `IReceivePolicyGuard.ClaimReceiptV1` witness, obtained
+    /// off-chain by indexing the token's `TransferBlocked` event — the guard
+    /// does not enumerate receipts on-chain.
+    ///
+    /// Permissionless when `to` is the original recipient (the affected
+    /// participant), matching the rest of this contract's "anyone can
+    /// trigger it, funds always go to the correct owner" pattern. Redirecting
+    /// to a *different* address (e.g. because the participant is still
+    /// blocked at their channel address and wants funds sent elsewhere)
+    /// requires `msg.sender == recipient`. Tempo's own guard independently
+    /// re-enforces who is allowed to claim the receipt and where a reroute
+    /// may land — this check is defense in depth, not the only guard.
+    function rescueBlockedPayout(bytes32 channelId, address token, bytes calldata receipt, address to)
+        external
+        nonReentrant
+    {
+        IReceivePolicyGuard.ClaimReceiptV1 memory r = abi.decode(receipt, (IReceivePolicyGuard.ClaimReceiptV1));
+        if (r.token != token || r.originator != address(this)) revert ReceiptMismatch();
+
+        address participant = r.recipient;
+        if (to != participant && msg.sender != participant) revert NotAuthorizedToRedirect();
+
+        uint128 pending = _blockedPayouts[channelId][participant];
+        if (pending == 0) revert NoBlockedPayout();
+        _blockedPayouts[channelId][participant] = 0;
+
+        RECEIVE_POLICY_GUARD.claim(to, receipt);
+
+        emit BlockedPayoutRescued(channelId, participant, token, pending, to);
+    }
+
+    /// @dev Uses Tempo's TIP-1020 precompile instead of a hardcoded ECDSA
+    /// check, so participants can sign channel states with any Tempo
+    /// signature type (secp256k1, P256, or WebAuthn/passkey) and the
+    /// contract keeps working if Tempo adds new account/signature types
+    /// later — this contract never needs to be redeployed for that.
+    /// `recover` reverts on a malformed signature; that's caught and
+    /// treated as "not valid" rather than reverting the whole transaction,
+    /// since a malformed signature from one candidate signer shouldn't
+    /// prevent trying the other.
     function _isValidSignature(bytes32 digest, bytes calldata signature, address participant, address authorizedSigner)
         internal
-        pure
+        view
         returns (bool)
     {
-        address signer = ECDSA.recover(digest, signature);
-        return signer == participant || (authorizedSigner != address(0) && signer == authorizedSigner);
+        try SIGNATURE_VERIFIER.recover(digest, signature) returns (address signer) {
+            return signer == participant || (authorizedSigner != address(0) && signer == authorizedSigner);
+        } catch {
+            return false;
+        }
     }
 
     function _hashIntent(ChannelIntent calldata intent) internal view returns (bytes32) {
