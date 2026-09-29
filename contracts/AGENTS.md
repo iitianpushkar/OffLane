@@ -28,6 +28,9 @@ consent.
 - Signatures are verified through Tempo's TIP-1020 precompile, which accepts
   secp256k1, P256, and WebAuthn/passkey signatures — participants aren't
   limited to raw ECDSA keys.
+- Delegated/session signing keys go through Tempo's native Account Keychain
+  precompile, not a field on the contract itself — see "Delegated signing
+  keys" below.
 
 ## EIP-712 domain
 
@@ -58,16 +61,22 @@ struct ChannelIntent {
     uint128 depositB;
     uint32 challengeDuration;   // seconds; 1 hour <= x <= 30 days
     uint32 validUntil;          // unix timestamp; open/join must happen before this
-    address authorizedSignerA;  // optional delegated session key for A; address(0) = none
-    address authorizedSignerB;  // optional delegated session key for B; address(0) = none
     uint256 salt;                // uniqueness — pick a fresh random value per channel
 }
 ```
 
 typehash string:
 ```
-ChannelIntent(uint8 protocolVersion,address participantA,address participantB,address token,uint128 depositA,uint128 depositB,uint32 challengeDuration,uint32 validUntil,address authorizedSignerA,address authorizedSignerB,uint256 salt)
+ChannelIntent(uint8 protocolVersion,address participantA,address participantB,address token,uint128 depositA,uint128 depositB,uint32 challengeDuration,uint32 validUntil,uint256 salt)
 ```
+
+**Changed 2026-09-30**: this struct used to also carry `authorizedSignerA`/
+`authorizedSignerB` address fields for delegated session keys. Those are
+gone — delegated signing now goes entirely through Tempo's native Account
+Keychain precompile instead, tracked nowhere in this contract. See
+"Delegated signing keys" below; if you built against the old shape, drop
+those two fields from every struct construction, hash, and signature you
+produce, or your signatures won't match the new typehash.
 
 **`ChannelIntent` is never stored on-chain in full.** Only its derived
 `channelId` and resulting balances/status are. The relay (or client) must
@@ -105,7 +114,7 @@ here. The contract never interprets this field — it's opaque to
 ### Deriving `channelId`
 
 ```
-structHash = keccak256(abi.encode(CHANNEL_INTENT_TYPEHASH, <all 11 intent fields in order>))
+structHash = keccak256(abi.encode(CHANNEL_INTENT_TYPEHASH, <all 9 intent fields in order>))
 channelId  = keccak256(abi.encode(structHash, chainId, verifyingContract))
 ```
 
@@ -280,22 +289,60 @@ function getBlockedPayout(bytes32 channelId, address participant) external view 
 ```
 
 `Channel` (the returned struct) includes `status` (`VOID`/`PENDING`/`OPEN`/
-`CLOSING`), both participants, token, current `nonce`/balances,
-`challengeExpireAt`, and both `authorizedSigner` fields — everything the
-relay needs to reconcile its own view against on-chain truth without
-replaying every event from genesis.
+`CLOSING`), both participants, token, and current `nonce`/balances/
+`challengeExpireAt` — everything the relay needs to reconcile its own view
+against on-chain truth without replaying every event from genesis. (It no
+longer carries any delegated-signer fields — see below.)
 
-## Delegated signing keys (`authorizedSigner`)
+## Delegated signing keys — Tempo Account Keychain
 
-Either participant can set `authorizedSignerA`/`B` in the original
-`ChannelIntent` to a separate address. If set, signatures from *either* the
-participant's own address or their `authorizedSigner` are accepted for that
-participant, for every subsequent signature check in the channel (join,
-close, challenge). This is a lightweight session-key mechanism — useful if
-a participant wants to delegate signing to an automated agent/session
-without exposing their main key. The relay doesn't need to do anything
-special here beyond accepting signatures from whichever key the client
-hands it.
+**Changed 2026-09-30**: there is no `authorizedSigner` field on this
+contract anymore. Delegated/session signing keys are handled entirely
+through Tempo's native **Account Keychain** precompile
+(`https://docs.tempo.xyz/developers/docs/protocol/transactions/AccountKeychain`,
+fixed address `0xaAAAaaAA00000000000000000000000000000000`), which the
+relay/client SDK talks to directly — this contract only ever *reads* from
+it, never writes.
+
+**How a participant delegates a session key** (entirely outside this
+contract, from their own wallet):
+
+```solidity
+function authorizeKey(address keyId, SignatureType signatureType, KeyRestrictions calldata config) external
+```
+
+called on the Account Keychain precompile, where `keyId` is the delegated
+key's address and `config.expiry` sets when it stops working. The
+participant can revoke it early at any time with `revokeKey(keyId)`.
+
+**How this contract checks it**: when verifying a signature against
+`participant`, `_isValidSignature` first tries the participant's own
+address via TIP-1020 `recover`; if that doesn't match, it calls
+`ACCOUNT_KEYCHAIN.getKey(participant, recoveredSigner)` and accepts the
+signature only if the returned key is **not revoked and not expired**
+(`!isRevoked && block.timestamp < expiry`). This applies uniformly to every
+signature check in the contract — open, join, cooperative close, initiate
+close, challenge.
+
+**What this does and does not give you:**
+- ✅ Real, chain-enforced expiry and instant revocation. A participant
+  revokes a compromised session key from their wallet and it stops working
+  in every open channel immediately — nothing to do on this contract's side.
+- ❌ **No automatic per-channel spend cap.** Account Keychain's spending
+  limits and call scopes are enforced by Tempo's protocol only for a key's
+  *own direct* on-chain TIP-20 `transfer`/`transferWithMemo`/`approve` calls
+  as a transaction signer — they do not apply to an arbitrary off-chain-signed
+  `ChannelState` this contract verifies independently. If a relay/client
+  needs to bound how much a delegated key can authorize within a channel,
+  that has to be enforced at the relay/SDK layer (e.g. refuse to countersign
+  or forward a state that exceeds an agreed cap) — this contract does not do
+  it for you.
+- The relay doesn't need to construct or sign anything for this — it just
+  needs to accept signatures from whichever key the client hands it (their
+  root key or a delegated one) and pass them straight through. If a
+  signature that used to work suddenly gets rejected with `InvalidSignature`,
+  check whether the signing key was revoked or expired before assuming
+  something else broke.
 
 ## Errors the relay should handle gracefully
 
@@ -314,10 +361,11 @@ discovering them from a reverted transaction.
 ## What the relay must never do
 
 - Never construct or sign a `ChannelIntent`/`ChannelState` on a
-  participant's behalf — it has no keys for either participant.
-  If it holds an `authorizedSigner` key that a participant explicitly
-  delegated to it, that's the one exception, and only within the scope the
-  participant granted it.
+  participant's behalf — it has no keys for either participant. If a
+  participant has delegated a session key to it via Tempo's Account
+  Keychain (see above), that's the one exception, and only within the
+  expiry/revocation the participant set — the relay does not get to decide
+  when that delegation ends, the participant does, from their own wallet.
 - Never assume a `transfer`/`transferFrom` call reverting means "nothing
   happened" without also checking for the TIP-403 redirect case.
 - Never trust a self-reported balance over the contract's `getChannel`

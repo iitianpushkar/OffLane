@@ -6,6 +6,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {ITIP20} from "./interfaces/ITIP20.sol";
 import {ITempoSignatureVerifier} from "./interfaces/ITempoSignatureVerifier.sol";
 import {IReceivePolicyGuard} from "./interfaces/IReceivePolicyGuard.sol";
+import {IAccountKeychain} from "./interfaces/IAccountKeychain.sol";
 
 /// @title ChannelManager
 /// @notice Two-party, bidirectional, collateralized state-channel contract for
@@ -19,7 +20,7 @@ import {IReceivePolicyGuard} from "./interfaces/IReceivePolicyGuard.sol";
 ///   `transferFrom`/`transfer`, never `msg.value`. There are no `payable`
 ///   functions in this contract.
 /// - Storage is expensive on Tempo (~250,000 gas per new 32-byte slot vs
-///   ~20,000 on Ethereum), so `Channel` is packed into 6 slots. See the
+///   ~20,000 on Ethereum), so `Channel` is packed into 4 slots. See the
 ///   field-by-field slot comments below.
 /// - `ChannelIntent` (the open/join agreement) is never stored on-chain in
 ///   full — only its EIP-712 struct hash (via `channelId`) and the derived
@@ -34,6 +35,23 @@ import {IReceivePolicyGuard} from "./interfaces/IReceivePolicyGuard.sol";
 ///   state than the one used to start the close. This is simpler than a
 ///   single-challenger-signature scheme because every valid state was
 ///   agreed by both parties at the moment it was signed off-chain.
+/// - Session/delegated signing keys are NOT tracked in this contract's own
+///   storage. A participant delegates a channel-scoped signing key entirely
+///   through Tempo's native Account Keychain precompile (`authorizeKey`, on
+///   their own wallet/account, outside this contract) — this contract just
+///   *queries* that precompile (`getKey`) to check whether the recovered
+///   signer is a currently active (non-revoked, non-expired) access key of
+///   the participant. This gets real, chain-enforced expiry and instant
+///   revocation "for free": a participant can revoke a compromised session
+///   key at any time via a normal wallet action, and it takes effect in
+///   every open channel immediately, with no per-channel state to update
+///   here. Note this does NOT get per-channel spend caps for free — Account
+///   Keychain's spending limits only apply to a key's own direct TIP-20
+///   `transfer`/`transferWithMemo`/`approve` calls as a transaction signer,
+///   not to arbitrary off-chain-signed messages like `ChannelState` that
+///   this contract verifies independently. A per-channel spend cap on a
+///   delegated signer, if ever needed, would have to be this contract's own
+///   feature, not inherited from Account Keychain.
 contract ChannelManager is EIP712, ReentrancyGuard {
     // =========================================================================
     //                                Constants
@@ -51,8 +69,11 @@ contract ChannelManager is EIP712, ReentrancyGuard {
     IReceivePolicyGuard internal constant RECEIVE_POLICY_GUARD =
         IReceivePolicyGuard(0xB10C000000000000000000000000000000000000);
 
+    /// @dev Tempo's Account Keychain precompile, fixed system address.
+    IAccountKeychain internal constant ACCOUNT_KEYCHAIN = IAccountKeychain(0xaAAAaaAA00000000000000000000000000000000);
+
     bytes32 private constant CHANNEL_INTENT_TYPEHASH = keccak256(
-        "ChannelIntent(uint8 protocolVersion,address participantA,address participantB,address token,uint128 depositA,uint128 depositB,uint32 challengeDuration,uint32 validUntil,address authorizedSignerA,address authorizedSignerB,uint256 salt)"
+        "ChannelIntent(uint8 protocolVersion,address participantA,address participantB,address token,uint128 depositA,uint128 depositB,uint32 challengeDuration,uint32 validUntil,uint256 salt)"
     );
 
     bytes32 private constant CHANNEL_STATE_TYPEHASH =
@@ -80,8 +101,6 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         uint128 depositB;
         uint32 challengeDuration; // seconds
         uint32 validUntil; // unix timestamp; join/open must happen before this
-        address authorizedSignerA; // optional delegated session key for A; address(0) = none
-        address authorizedSignerB; // optional delegated session key for B; address(0) = none
         uint256 salt; // uniqueness, so identical-parameter channels don't collide
     }
 
@@ -97,13 +116,11 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         bytes32 appDataHash; // opaque hash binding e.g. an encrypted message reference
     }
 
-    /// @dev Packed into 6 storage slots (32 bytes each):
+    /// @dev Packed into 4 storage slots (32 bytes each):
     ///   slot0: participantA(20) + challengeDuration(4) + status(1) + validUntil(4)
     ///   slot1: participantB(20) + nonce(8)
     ///   slot2: token(20) + challengeExpireAt(8)
-    ///   slot3: authorizedSignerA(20)
-    ///   slot4: authorizedSignerB(20)
-    ///   slot5: balanceA(16) + balanceB(16)
+    ///   slot3: balanceA(16) + balanceB(16)
     struct Channel {
         address participantA;
         uint32 challengeDuration;
@@ -113,8 +130,6 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         uint64 nonce;
         address token;
         uint64 challengeExpireAt;
-        address authorizedSignerA;
-        address authorizedSignerB;
         uint128 balanceA;
         uint128 balanceB;
     }
@@ -217,7 +232,7 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         channelId = _computeChannelId(intent);
         if (_channels[channelId].status != Status.VOID) revert ChannelAlreadyExists();
 
-        if (!_isValidSignature(_hashIntent(intent), signatureA, intent.participantA, intent.authorizedSignerA)) {
+        if (!_isValidSignature(_hashIntent(intent), signatureA, intent.participantA)) {
             revert InvalidSignature();
         }
 
@@ -227,8 +242,6 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         ch.token = intent.token;
         ch.challengeDuration = intent.challengeDuration;
         ch.validUntil = intent.validUntil;
-        ch.authorizedSignerA = intent.authorizedSignerA;
-        ch.authorizedSignerB = intent.authorizedSignerB;
         ch.status = Status.PENDING;
         ch.balanceA = intent.depositA;
         // ch.nonce, ch.balanceB, ch.challengeExpireAt default to 0
@@ -266,7 +279,7 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         if (ch.status != Status.PENDING) revert ChannelNotPending();
         if (block.timestamp >= intent.validUntil) revert IntentExpired();
 
-        if (!_isValidSignature(_hashIntent(intent), signatureB, intent.participantB, intent.authorizedSignerB)) {
+        if (!_isValidSignature(_hashIntent(intent), signatureB, intent.participantB)) {
             revert InvalidSignature();
         }
 
@@ -428,8 +441,8 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         }
 
         bytes32 digest = _hashState(state);
-        if (!_isValidSignature(digest, signatureA, ch.participantA, ch.authorizedSignerA)) revert InvalidSignature();
-        if (!_isValidSignature(digest, signatureB, ch.participantB, ch.authorizedSignerB)) revert InvalidSignature();
+        if (!_isValidSignature(digest, signatureA, ch.participantA)) revert InvalidSignature();
+        if (!_isValidSignature(digest, signatureB, ch.participantB)) revert InvalidSignature();
     }
 
     /// @dev Pays out `payoutA`/`payoutB`, deletes the channel (storage
@@ -525,15 +538,33 @@ contract ChannelManager is EIP712, ReentrancyGuard {
     /// later — this contract never needs to be redeployed for that.
     /// `recover` reverts on a malformed signature; that's caught and
     /// treated as "not valid" rather than reverting the whole transaction,
-    /// since a malformed signature from one candidate signer shouldn't
-    /// prevent trying the other.
-    function _isValidSignature(bytes32 digest, bytes calldata signature, address participant, address authorizedSigner)
+    /// since a malformed signature from a delegated key shouldn't prevent
+    /// falling through to check whether it's the participant's own key (or
+    /// vice versa).
+    ///
+    /// A signature from an address other than `participant` itself is only
+    /// accepted if it's a currently active (non-revoked, non-expired) Tempo
+    /// Account Keychain access key delegated by `participant` — queried live
+    /// against the real precompile, not tracked in this contract's own
+    /// storage. See the contract-level dev note for what this does and does
+    /// not cover.
+    function _isValidSignature(bytes32 digest, bytes calldata signature, address participant)
         internal
         view
         returns (bool)
     {
         try SIGNATURE_VERIFIER.recover(digest, signature) returns (address signer) {
-            return signer == participant || (authorizedSigner != address(0) && signer == authorizedSigner);
+            return signer == participant || _isActiveAccessKey(participant, signer);
+        } catch {
+            return false;
+        }
+    }
+
+    /// @dev Whether `keyId` is a currently active (non-revoked, non-expired)
+    /// Tempo Account Keychain access key delegated by `account`.
+    function _isActiveAccessKey(address account, address keyId) internal view returns (bool) {
+        try ACCOUNT_KEYCHAIN.getKey(account, keyId) returns (IAccountKeychain.KeyInfo memory key) {
+            return !key.isRevoked && block.timestamp < key.expiry;
         } catch {
             return false;
         }
@@ -551,8 +582,6 @@ contract ChannelManager is EIP712, ReentrancyGuard {
                 intent.depositB,
                 intent.challengeDuration,
                 intent.validUntil,
-                intent.authorizedSignerA,
-                intent.authorizedSignerB,
                 intent.salt
             )
         );
@@ -585,8 +614,6 @@ contract ChannelManager is EIP712, ReentrancyGuard {
                 intent.depositB,
                 intent.challengeDuration,
                 intent.validUntil,
-                intent.authorizedSignerA,
-                intent.authorizedSignerB,
                 intent.salt
             )
         );

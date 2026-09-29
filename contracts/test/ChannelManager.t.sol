@@ -6,6 +6,45 @@ import {ChannelManager} from "../src/ChannelManager.sol";
 import {IReceivePolicyGuard} from "../src/interfaces/IReceivePolicyGuard.sol";
 import {MockTIP20} from "./mocks/MockTIP20.sol";
 
+/// @dev Test-only interface exposing the Account Keychain mutators
+/// ChannelManager itself never calls (it only ever reads via `getKey`) but
+/// tests need in order to actually provision/revoke a delegated key against
+/// the real precompile.
+interface IAccountKeychainTestHelper {
+    enum SignatureType {
+        Secp256k1,
+        P256,
+        WebAuthn
+    }
+
+    struct TokenLimit {
+        address token;
+        uint256 amount;
+        uint64 period;
+    }
+
+    struct SelectorRule {
+        bytes4 selector;
+        address[] recipients;
+    }
+
+    struct CallScope {
+        address target;
+        SelectorRule[] selectorRules;
+    }
+
+    struct KeyRestrictions {
+        uint64 expiry;
+        bool enforceLimits;
+        TokenLimit[] limits;
+        bool allowAnyCalls;
+        CallScope[] allowedCalls;
+    }
+
+    function authorizeKey(address keyId, SignatureType signatureType, KeyRestrictions calldata config) external;
+    function revokeKey(address keyId) external;
+}
+
 contract ChannelManagerTest is Test {
     // Real Tempo system precompiles. Foundry's `tempo = true` profile
     // (see foundry.toml) emulates these for real in the local test EVM —
@@ -16,6 +55,7 @@ contract ChannelManagerTest is Test {
     // directly rather than a stand-in.
     address internal constant SIGNATURE_VERIFIER_ADDR = 0x5165300000000000000000000000000000000000;
     address internal constant RECEIVE_POLICY_GUARD_ADDR = 0xB10C000000000000000000000000000000000000;
+    address internal constant ACCOUNT_KEYCHAIN_ADDR = 0xaAAAaaAA00000000000000000000000000000000;
 
     ChannelManager internal manager;
     MockTIP20 internal token;
@@ -28,7 +68,7 @@ contract ChannelManagerTest is Test {
     bytes32 internal constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 internal constant CHANNEL_INTENT_TYPEHASH = keccak256(
-        "ChannelIntent(uint8 protocolVersion,address participantA,address participantB,address token,uint128 depositA,uint128 depositB,uint32 challengeDuration,uint32 validUntil,address authorizedSignerA,address authorizedSignerB,uint256 salt)"
+        "ChannelIntent(uint8 protocolVersion,address participantA,address participantB,address token,uint128 depositA,uint128 depositB,uint32 challengeDuration,uint32 validUntil,uint256 salt)"
     );
     bytes32 internal constant CHANNEL_STATE_TYPEHASH =
         keccak256("ChannelState(bytes32 channelId,uint64 nonce,uint128 balanceA,uint128 balanceB,bytes32 appDataHash)");
@@ -79,8 +119,6 @@ contract ChannelManagerTest is Test {
             depositB: depositB,
             challengeDuration: manager.MIN_CHALLENGE_DURATION(),
             validUntil: uint32(block.timestamp + 1 days),
-            authorizedSignerA: address(0),
-            authorizedSignerB: address(0),
             salt: salt
         });
     }
@@ -97,8 +135,6 @@ contract ChannelManagerTest is Test {
                 intent.depositB,
                 intent.challengeDuration,
                 intent.validUntil,
-                intent.authorizedSignerA,
-                intent.authorizedSignerB,
                 intent.salt
             )
         );
@@ -265,6 +301,100 @@ contract ChannelManagerTest is Test {
         // Bob's slot is filled with Alice's signature again — not a valid signature from Bob.
         vm.expectRevert(ChannelManager.InvalidSignature.selector);
         manager.cooperativeClose(state, sigA, sigA);
+    }
+
+    // ------------------------------------------------------------------
+    // Account Keychain delegated session keys
+    // ------------------------------------------------------------------
+
+    function _authorizeAccessKey(address root, address keyId, uint64 expiry) internal {
+        IAccountKeychainTestHelper.KeyRestrictions memory config = IAccountKeychainTestHelper.KeyRestrictions({
+            expiry: expiry,
+            enforceLimits: false,
+            limits: new IAccountKeychainTestHelper.TokenLimit[](0),
+            allowAnyCalls: true,
+            allowedCalls: new IAccountKeychainTestHelper.CallScope[](0)
+        });
+        vm.prank(root);
+        IAccountKeychainTestHelper(ACCOUNT_KEYCHAIN_ADDR)
+            .authorizeKey(keyId, IAccountKeychainTestHelper.SignatureType.Secp256k1, config);
+    }
+
+    function test_SessionKey_DelegatedViaAccountKeychainIsAccepted() public {
+        (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 50);
+
+        uint256 sessionPk = 0x5E5510101;
+        address sessionKey = vm.addr(sessionPk);
+        _authorizeAccessKey(alice, sessionKey, uint64(block.timestamp + 1 days));
+
+        ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 1, balanceA: 60e6, balanceB: 140e6, appDataHash: bytes32(0)
+        });
+        // Alice signs with her DELEGATED session key, not her root key.
+        bytes memory sigA = _signState(state, sessionPk);
+        bytes memory sigB = _signState(state, bobPk);
+
+        uint256 aliceBefore = token.balanceOf(alice);
+        manager.cooperativeClose(state, sigA, sigB);
+        assertEq(token.balanceOf(alice), aliceBefore + 60e6, "payout still goes to alice, the root account");
+    }
+
+    function test_RevertWhen_AccountKeychainKeyIsExpired() public {
+        (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 51);
+
+        uint256 sessionPk = 0x5E5510102;
+        address sessionKey = vm.addr(sessionPk);
+        _authorizeAccessKey(alice, sessionKey, uint64(block.timestamp + 1 hours));
+
+        vm.warp(block.timestamp + 2 hours); // past expiry
+
+        ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 1, balanceA: 60e6, balanceB: 140e6, appDataHash: bytes32(0)
+        });
+        bytes memory sigA = _signState(state, sessionPk);
+        bytes memory sigB = _signState(state, bobPk);
+
+        vm.expectRevert(ChannelManager.InvalidSignature.selector);
+        manager.cooperativeClose(state, sigA, sigB);
+    }
+
+    function test_RevertWhen_AccountKeychainKeyIsRevoked() public {
+        (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 52);
+
+        uint256 sessionPk = 0x5E5510103;
+        address sessionKey = vm.addr(sessionPk);
+        _authorizeAccessKey(alice, sessionKey, uint64(block.timestamp + 1 days));
+
+        vm.prank(alice);
+        IAccountKeychainTestHelper(ACCOUNT_KEYCHAIN_ADDR).revokeKey(sessionKey);
+
+        ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 1, balanceA: 60e6, balanceB: 140e6, appDataHash: bytes32(0)
+        });
+        bytes memory sigA = _signState(state, sessionPk);
+        bytes memory sigB = _signState(state, bobPk);
+
+        vm.expectRevert(ChannelManager.InvalidSignature.selector);
+        manager.cooperativeClose(state, sigA, sigB);
+    }
+
+    function test_RevertWhen_KeyDelegatedByWrongParticipantIsUsed() public {
+        (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 53);
+
+        // Bob delegates a session key to himself...
+        uint256 sessionPk = 0x5E5510104;
+        address sessionKey = vm.addr(sessionPk);
+        _authorizeAccessKey(bob, sessionKey, uint64(block.timestamp + 1 days));
+
+        // ...but it's presented as if it were authorized to sign for Alice.
+        ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 1, balanceA: 60e6, balanceB: 140e6, appDataHash: bytes32(0)
+        });
+        bytes memory sigA = _signState(state, sessionPk);
+        bytes memory sigB = _signState(state, bobPk);
+
+        vm.expectRevert(ChannelManager.InvalidSignature.selector);
+        manager.cooperativeClose(state, sigA, sigB);
     }
 
     // ------------------------------------------------------------------

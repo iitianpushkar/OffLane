@@ -15,7 +15,7 @@ contract SmokeTest is Script {
     bytes32 internal constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 internal constant CHANNEL_INTENT_TYPEHASH = keccak256(
-        "ChannelIntent(uint8 protocolVersion,address participantA,address participantB,address token,uint128 depositA,uint128 depositB,uint32 challengeDuration,uint32 validUntil,address authorizedSignerA,address authorizedSignerB,uint256 salt)"
+        "ChannelIntent(uint8 protocolVersion,address participantA,address participantB,address token,uint128 depositA,uint128 depositB,uint32 challengeDuration,uint32 validUntil,uint256 salt)"
     );
     bytes32 internal constant CHANNEL_STATE_TYPEHASH =
         keccak256("ChannelState(bytes32 channelId,uint64 nonce,uint128 balanceA,uint128 balanceB,bytes32 appDataHash)");
@@ -49,8 +49,6 @@ contract SmokeTest is Script {
             depositB: 10e6,
             challengeDuration: cm.MIN_CHALLENGE_DURATION(),
             validUntil: uint32(block.timestamp + 1 days),
-            authorizedSignerA: address(0),
-            authorizedSignerB: address(0),
             salt: uint256(keccak256(abi.encode(block.timestamp, block.prevrandao, "smoke-test")))
         });
 
@@ -75,11 +73,7 @@ contract SmokeTest is Script {
 
         console.log("=== cooperativeClose (simulated: alice pays bob 4) ===");
         ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
-            channelId: channelId,
-            nonce: 1,
-            balanceA: 6e6,
-            balanceB: 14e6,
-            appDataHash: bytes32(0)
+            channelId: channelId, nonce: 1, balanceA: 6e6, balanceB: 14e6, appDataHash: bytes32(0)
         });
         bytes32 stateDigest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, _hashState(state)));
         bytes memory sigA2 = _sign(alicePk, stateDigest);
@@ -116,8 +110,6 @@ contract SmokeTest is Script {
                 intent.depositB,
                 intent.challengeDuration,
                 intent.validUntil,
-                intent.authorizedSignerA,
-                intent.authorizedSignerB,
                 intent.salt
             )
         );
