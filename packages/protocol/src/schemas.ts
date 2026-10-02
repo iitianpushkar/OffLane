@@ -88,13 +88,26 @@ export const stateAuthorizationWireSchema = z.discriminatedUnion("kind", [
     .strict(),
 ]);
 
-export const protocolMethodSchema = z.enum([
+export const protocolRequestMethods = [
+  "auth.v1.request_challenge",
+  "auth.v1.verify",
   "node.v1.ping",
   "channels.v1.propose_state",
+  "channels.v1.register_capability",
   "channels.v1.accept_state",
   "channels.v1.reject_state",
   "channels.v1.get_state",
+] as const;
+
+export const protocolEventMethods = [
+  "channels.v1.state_proposed",
+  "channels.v1.state_rejected",
   "channels.v1.state_updated",
+] as const;
+
+export const protocolMethodSchema = z.enum([
+  ...protocolRequestMethods,
+  ...protocolEventMethods,
 ]);
 
 export function encodeChannelState(state: ChannelState): {

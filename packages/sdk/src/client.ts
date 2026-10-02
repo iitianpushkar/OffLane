@@ -1,6 +1,10 @@
 import {
+  authChallengeResponseWireSchema,
+  authVerifyResponseWireSchema,
+  capabilityRegistrationWireSchema,
   createRpcMessage,
   decodeRpcMessage,
+  encodeChannelCapability,
   encodeChannelState,
   encodeRpcMessage,
   encodeStateAuthorization,
@@ -9,6 +13,10 @@ import {
   stateAcceptanceWireSchema,
   stateProposalWireSchema,
   type ProtocolMethod,
+  type Address,
+  type Bytes32,
+  type ChannelCapability,
+  type Hex,
   type RpcMessage,
   type RpcPayload,
   type StateAcceptanceMessage,
@@ -38,6 +46,11 @@ interface PendingRequest {
 
 export type EventListener = (message: RpcMessage) => void;
 export type ProtocolErrorListener = (error: RpcClientError) => void;
+
+export interface RelayAuthSigner {
+  address: Address;
+  signMessage(message: string): Promise<Hex>;
+}
 
 export class OfflaneClient {
   private readonly pending = new Map<number, PendingRequest>();
@@ -147,6 +160,32 @@ export class OfflaneClient {
     await this.call("node.v1.ping", {}, options);
   }
 
+  async authenticate(
+    signer: RelayAuthSigner,
+    options?: RpcCallOptions,
+  ): Promise<Address> {
+    const challenge = authChallengeResponseWireSchema.parse(
+      await this.call(
+        "auth.v1.request_challenge",
+        { signer: signer.address },
+        options,
+      ),
+    );
+    const signature = await signer.signMessage(challenge.message);
+    const verified = authVerifyResponseWireSchema.parse(
+      await this.call(
+        "auth.v1.verify",
+        {
+          challengeId: challenge.challengeId,
+          signer: signer.address,
+          signature,
+        },
+        options,
+      ),
+    );
+    return verified.signer;
+  }
+
   async proposeState(
     proposal: StateProposalMessage,
     options?: RpcCallOptions,
@@ -164,6 +203,19 @@ export class OfflaneClient {
     );
   }
 
+  async registerCapability(
+    capability: ChannelCapability,
+    capabilitySignature: Hex,
+    options?: RpcCallOptions,
+  ): Promise<RpcPayload> {
+    const payload = {
+      capability: encodeChannelCapability(capability),
+      capabilitySignature,
+    };
+    capabilityRegistrationWireSchema.parse(payload);
+    return this.call("channels.v1.register_capability", payload, options);
+  }
+
   async acceptState(
     acceptance: StateAcceptanceMessage,
     options?: RpcCallOptions,
@@ -179,6 +231,26 @@ export class OfflaneClient {
       payload,
       options,
     );
+  }
+
+  async rejectState(
+    proposalId: Bytes32,
+    channelId: Bytes32,
+    reason: string,
+    options?: RpcCallOptions,
+  ): Promise<RpcPayload> {
+    return this.call(
+      "channels.v1.reject_state",
+      { proposalId, channelId, reason },
+      options,
+    );
+  }
+
+  async getState(
+    channelId: Bytes32,
+    options?: RpcCallOptions,
+  ): Promise<RpcPayload> {
+    return this.call("channels.v1.get_state", { channelId }, options);
   }
 
   async close(): Promise<void> {

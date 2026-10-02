@@ -12,7 +12,7 @@ step was Nitrolite commit `111b7e5b03f9bed3faa6558ae4b88f3965301709`.
 | [`sdk/ts/src/rpc/dialer.ts`](https://github.com/layer-3/nitrolite/blob/111b7e5b03f9bed3faa6558ae4b88f3965301709/sdk/ts/src/rpc/dialer.ts) | Transport boundary, pending-request correlation, unsolicited events, cancellation | `packages/sdk/src/transport.ts`, `packages/sdk/src/client.ts` |
 | [`sdk/ts/src/rpc/methods.ts`](https://github.com/layer-3/nitrolite/blob/111b7e5b03f9bed3faa6558ae4b88f3965301709/sdk/ts/src/rpc/methods.ts) | Versioned method names grouped by domain | `node.v1.*`, `channels.v1.*` |
 | [`sdk/ts/src/signers.ts`](https://github.com/layer-3/nitrolite/blob/111b7e5b03f9bed3faa6558ae4b88f3965301709/sdk/ts/src/signers.ts) | Signing authority is an SDK boundary rather than relay-owned key material | Existing `StateAuthorization`; signer adapters are the next SDK slice |
-| [`nitronode`](https://github.com/layer-3/nitrolite/tree/111b7e5b03f9bed3faa6558ae4b88f3965301709/nitronode) | Relay as persistent coordinator and chain-event observer | Planned `services/relay` package |
+| [`nitronode`](https://github.com/layer-3/nitrolite/tree/111b7e5b03f9bed3faa6558ae4b88f3965301709/nitronode) | Relay router, storage boundary, connection hub, and chain-event observer | `services/relay`; durable storage and the chain observer are the next adapters |
 
 ## What differs intentionally
 
@@ -45,5 +45,8 @@ The initial method surface is:
 - `channels.v1.get_state`
 - `channels.v1.state_updated`
 
-The next relay step must use these protocol schemas directly and add a drift
-test so the relay router and SDK cannot silently disagree about method names.
+The relay imports these schemas directly. Its drift test compares the complete
+request-method registry with the router, preventing the relay and SDK from
+silently disagreeing about method names. The current in-memory store isolates
+the persistence boundary; SQLite and `ChannelManager` event ingestion can be
+added without changing RPC routing or state validation.

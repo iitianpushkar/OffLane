@@ -2,7 +2,9 @@ import { z } from "zod";
 import {
   addressSchema,
   bytes32Schema,
+  channelCapabilityWireSchema,
   channelStateWireSchema,
+  hexSchema,
   protocolMethodSchema,
   stateAuthorizationWireSchema,
   uint64StringSchema,
@@ -60,6 +62,13 @@ export const stateProposalWireSchema = z
   })
   .strict();
 
+export const capabilityRegistrationWireSchema = z
+  .object({
+    capability: channelCapabilityWireSchema,
+    capabilitySignature: hexSchema,
+  })
+  .strict();
+
 export const stateAcceptanceWireSchema = z
   .object({
     proposalId: bytes32Schema,
@@ -86,6 +95,30 @@ export const rpcErrorPayloadSchema = z
     code: z.string().min(1).max(64),
     message: z.string().min(1).max(512),
   })
+  .strict();
+
+export const authChallengeRequestWireSchema = z
+  .object({ signer: addressSchema })
+  .strict();
+
+export const authChallengeResponseWireSchema = z
+  .object({
+    challengeId: bytes32Schema,
+    message: z.string().min(1).max(1024),
+    expiresAt: safeIntegerSchema,
+  })
+  .strict();
+
+export const authVerifyRequestWireSchema = z
+  .object({
+    challengeId: bytes32Schema,
+    signer: addressSchema,
+    signature: hexSchema,
+  })
+  .strict();
+
+export const authVerifyResponseWireSchema = z
+  .object({ signer: addressSchema })
   .strict();
 
 export interface StateProposalMessage extends StateProposal {
