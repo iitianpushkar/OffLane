@@ -1,15 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
   buildPaymentState,
+  channelCapabilityWireSchema,
   channelStateWireSchema,
+  encodeChannelCapability,
   encodeChannelState,
+  hashChannelCapability,
   hashPaymentMetadata,
   ProtocolValidationError,
   resolveProposalCollision,
+  stateAuthorizationWireSchema,
+  validateCapabilityForState,
   validatePaymentTransition,
   type Address,
   type Bytes32,
   type ChannelContext,
+  type ChannelCapability,
   type PaymentMetadata,
   type StateProposal,
 } from "./index.js";
@@ -18,6 +24,8 @@ const A = "0x00000000000000000000000000000000000000a1" as Address;
 const B = "0x00000000000000000000000000000000000000b2" as Address;
 const CHANNEL = `0x${"11".repeat(32)}` as Bytes32;
 const EMPTY_HASH = `0x${"00".repeat(32)}` as Bytes32;
+const TOKEN = "0x0000000000000000000000000000000000000020" as Address;
+const AGENT = "0x00000000000000000000000000000000000000c3" as Address;
 
 function context(nonce = 0n, balanceA = 100n, balanceB = 100n): ChannelContext {
   return {
@@ -124,6 +132,50 @@ describe("wire encoding", () => {
       }),
     ).toThrow();
   });
+
+  it("round-trips a constrained channel capability", () => {
+    const capability: ChannelCapability = {
+      protocolVersion: 1,
+      channelId: CHANNEL,
+      participant: A,
+      delegatedSigner: AGENT,
+      counterparty: B,
+      token: TOKEN,
+      baselineBalance: 100n,
+      maxNetSpend: 20n,
+      capabilityNonce: 7n,
+    };
+
+    expect(
+      channelCapabilityWireSchema.parse(encodeChannelCapability(capability)),
+    ).toEqual(capability);
+
+    const authorization = stateAuthorizationWireSchema.parse({
+      kind: "capability",
+      stateSignature: "0x1234",
+      capability: encodeChannelCapability(capability),
+      capabilitySignature: "0xabcd",
+    });
+    expect(authorization.capability).toEqual(capability);
+  });
+
+  it("rejects a capability whose limit exceeds its baseline", () => {
+    const encoded = encodeChannelCapability({
+      protocolVersion: 1,
+      channelId: CHANNEL,
+      participant: A,
+      delegatedSigner: AGENT,
+      counterparty: B,
+      token: TOKEN,
+      baselineBalance: 100n,
+      maxNetSpend: 101n,
+      capabilityNonce: 8n,
+    });
+
+    expect(() => channelCapabilityWireSchema.parse(encoded)).toThrowError(
+      /cannot exceed baselineBalance/,
+    );
+  });
 });
 
 describe("concurrent proposal ordering", () => {
@@ -184,6 +236,80 @@ describe("application-data commitment", () => {
     expect(hashPaymentMetadata(metadata)).toBe(forward);
     expect(hashPaymentMetadata({ ...metadata, payer: B, payee: A })).not.toBe(
       forward,
+    );
+  });
+});
+
+describe("agent capability commitment", () => {
+  it("binds the delegate, channel and maximum net spend", () => {
+    const domain = {
+      name: "Tempo.ChannelManager",
+      version: "1",
+      chainId: 42431,
+      verifyingContract:
+        "0x00000000000000000000000000000000000000d4" as Address,
+    };
+    const capability: ChannelCapability = {
+      protocolVersion: 1,
+      channelId: CHANNEL,
+      participant: A,
+      delegatedSigner: AGENT,
+      counterparty: B,
+      token: TOKEN,
+      baselineBalance: 100n,
+      maxNetSpend: 20n,
+      capabilityNonce: 9n,
+    };
+
+    const digest = hashChannelCapability(domain, capability);
+    expect(hashChannelCapability(domain, capability)).toBe(digest);
+    expect(
+      hashChannelCapability(domain, { ...capability, maxNetSpend: 21n }),
+    ).not.toBe(digest);
+    expect(
+      hashChannelCapability(domain, {
+        ...capability,
+        channelId: `0x${"12".repeat(32)}`,
+      }),
+    ).not.toBe(digest);
+  });
+
+  it("mirrors the contract's balance floor in both directions", () => {
+    const terms = { participantA: A, participantB: B, token: TOKEN };
+    const aliceCapability: ChannelCapability = {
+      protocolVersion: 1,
+      channelId: CHANNEL,
+      participant: A,
+      delegatedSigner: AGENT,
+      counterparty: B,
+      token: TOKEN,
+      baselineBalance: 100n,
+      maxNetSpend: 20n,
+      capabilityNonce: 10n,
+    };
+    const alicePays = buildPaymentState(context(), A, 20n, EMPTY_HASH);
+
+    expect(
+      validateCapabilityForState(terms, aliceCapability, alicePays),
+    ).toEqual({ participantBalance: 80n, minimumBalance: 80n });
+
+    const overspend = buildPaymentState(context(), A, 21n, EMPTY_HASH);
+    expect(() =>
+      validateCapabilityForState(terms, aliceCapability, overspend),
+    ).toThrowError(/maximum net spend/);
+
+    const bobCapability: ChannelCapability = {
+      ...aliceCapability,
+      participant: B,
+      delegatedSigner:
+        "0x00000000000000000000000000000000000000d5" as Address,
+      counterparty: A,
+      maxNetSpend: 10n,
+      capabilityNonce: 11n,
+    };
+    const bobPays = buildPaymentState(context(), B, 10n, EMPTY_HASH);
+    expect(validateCapabilityForState(terms, bobCapability, bobPays)).toEqual(
+      { participantBalance: 90n, minimumBalance: 90n },
     );
   });
 });

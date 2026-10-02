@@ -4,7 +4,12 @@ import {
   keccak256,
   type TypedDataDomain,
 } from "viem";
-import type { Bytes32, ChannelState, PaymentMetadata } from "./types.js";
+import type {
+  Bytes32,
+  ChannelCapability,
+  ChannelState,
+  PaymentMetadata,
+} from "./types.js";
 
 export const channelStateTypes = {
   ChannelState: [
@@ -13,6 +18,20 @@ export const channelStateTypes = {
     { name: "balanceA", type: "uint128" },
     { name: "balanceB", type: "uint128" },
     { name: "appDataHash", type: "bytes32" },
+  ],
+} as const;
+
+export const channelCapabilityTypes = {
+  ChannelCapability: [
+    { name: "protocolVersion", type: "uint8" },
+    { name: "channelId", type: "bytes32" },
+    { name: "participant", type: "address" },
+    { name: "delegatedSigner", type: "address" },
+    { name: "counterparty", type: "address" },
+    { name: "token", type: "address" },
+    { name: "baselineBalance", type: "uint128" },
+    { name: "maxNetSpend", type: "uint128" },
+    { name: "capabilityNonce", type: "uint256" },
   ],
 } as const;
 
@@ -25,6 +44,18 @@ export function hashChannelState(
     types: channelStateTypes,
     primaryType: "ChannelState",
     message: state,
+  });
+}
+
+export function hashChannelCapability(
+  domain: TypedDataDomain,
+  capability: ChannelCapability,
+): Bytes32 {
+  return hashTypedData({
+    domain,
+    types: channelCapabilityTypes,
+    primaryType: "ChannelCapability",
+    message: capability,
   });
 }
 

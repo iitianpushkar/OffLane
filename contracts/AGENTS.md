@@ -28,9 +28,8 @@ consent.
 - Signatures are verified through Tempo's TIP-1020 precompile, which accepts
   secp256k1, P256, and WebAuthn/passkey signatures — participants aren't
   limited to raw ECDSA keys.
-- Delegated/session signing keys go through Tempo's native Account Keychain
-  precompile, not a field on the contract itself — see "Delegated signing
-  keys" below.
+- Automated state-signing keys use root-signed, channel-scoped capabilities
+  with an on-chain maximum-net-spend check.
 
 ## EIP-712 domain
 
@@ -46,7 +45,7 @@ Standard OpenZeppelin `EIP712` domain separator — derive it the normal way
 
 ## Typed data structs
 
-Both structs below must be encoded **exactly** as written — the typehash is
+The structs below must be encoded **exactly** as written — each typehash is
 a literal string hash, so field order/types/names must match char-for-char.
 
 ### `ChannelIntent` — the open/join agreement
@@ -72,11 +71,10 @@ ChannelIntent(uint8 protocolVersion,address participantA,address participantB,ad
 
 **Changed 2026-09-30**: this struct used to also carry `authorizedSignerA`/
 `authorizedSignerB` address fields for delegated session keys. Those are
-gone — delegated signing now goes entirely through Tempo's native Account
-Keychain precompile instead, tracked nowhere in this contract. See
-"Delegated signing keys" below; if you built against the old shape, drop
-those two fields from every struct construction, hash, and signature you
-produce, or your signatures won't match the new typehash.
+gone. Open/join now require direct participant signatures, while automated
+balance-state signing uses the separate `ChannelCapability` below. If you built
+against the old shape, drop those two fields from every intent struct, hash,
+and signature or your signatures won't match the current typehash.
 
 **`ChannelIntent` is never stored on-chain in full.** Only its derived
 `channelId` and resulting balances/status are. The relay (or client) must
@@ -110,6 +108,31 @@ the relay should sanity-check it before forwarding a state, to fail fast).
 encrypted message, hash that message (or its ciphertext/receipt) and put it
 here. The contract never interprets this field — it's opaque to
 `ChannelManager`, purely for the relay/client's own binding logic.
+
+### `ChannelCapability` — constrained agent authorization
+
+```solidity
+struct ChannelCapability {
+    uint8 protocolVersion;
+    bytes32 channelId;
+    address participant;
+    address delegatedSigner;
+    address counterparty;
+    address token;
+    uint128 baselineBalance;
+    uint128 maxNetSpend;
+    uint256 capabilityNonce;
+}
+```
+
+typehash string:
+```
+ChannelCapability(uint8 protocolVersion,bytes32 channelId,address participant,address delegatedSigner,address counterparty,address token,uint128 baselineBalance,uint128 maxNetSpend,uint256 capabilityNonce)
+```
+
+The participant account signs this capability with the same EIP-712 domain.
+The delegated signer separately signs each `ChannelState`. See "Channel-scoped
+agent capabilities" below for enforcement semantics.
 
 ### Deriving `channelId`
 
@@ -199,9 +222,17 @@ open channel it's involved in, since it needs it for step 5.
 
 ```solidity
 function cooperativeClose(ChannelState calldata state, bytes calldata signatureA, bytes calldata signatureB) external
+
+function cooperativeCloseWithCapabilities(
+    ChannelState calldata state,
+    StateAuthorization calldata authorizationA,
+    StateAuthorization calldata authorizationB
+) external
 ```
 
-- Requires **both** signatures over the final agreed state.
+- Requires **both** signatures over the final agreed state. Use the original
+  function when both state signatures come directly from participant accounts;
+  use the capability-aware variant when either side uses an agent key.
 - Settles immediately: pays out `balanceA`/`balanceB`, deletes the channel.
 - Works from `OPEN` or `CLOSING` — either party can short-circuit an
   in-progress unilateral close if they'd rather just finish cooperatively.
@@ -216,6 +247,12 @@ party (or the relay on their behalf) calls:
 
 ```solidity
 function initiateClose(ChannelState calldata state, bytes calldata signatureA, bytes calldata signatureB) external
+
+function initiateCloseWithCapabilities(
+    ChannelState calldata state,
+    StateAuthorization calldata authorizationA,
+    StateAuthorization calldata authorizationB
+) external
 ```
 
 with the latest mutually-signed state they have. This requires **both**
@@ -230,6 +267,12 @@ favorable-to-them state), it must call:
 
 ```solidity
 function challenge(ChannelState calldata newerState, bytes calldata signatureA, bytes calldata signatureB) external
+
+function challengeWithCapabilities(
+    ChannelState calldata newerState,
+    StateAuthorization calldata authorizationA,
+    StateAuthorization calldata authorizationB
+) external
 ```
 
 before `challengeExpireAt`. Requires `newerState.nonce > ch.nonce` and both
@@ -303,62 +346,67 @@ After settlement or cancellation, `getChannel(channelId).status` returns
 `VOID` because the live channel is deleted. Use `isChannelIdUsed(channelId)`
 to distinguish a completed/cancelled channel from an ID that has never opened.
 
-## Delegated signing keys — Tempo Account Keychain
+## Channel-scoped agent capabilities
 
-**Changed 2026-09-30**: there is no `authorizedSigner` field on this
-contract anymore. Delegated/session signing keys are handled entirely
-through Tempo's native **Account Keychain** precompile
-(`https://docs.tempo.xyz/developers/docs/protocol/transactions/AccountKeychain`,
-fixed address `0xaAAAaaAA00000000000000000000000000000000`), which the
-relay/client SDK talks to directly — this contract only ever *reads* from
-it, never writes.
+Open/join intents require direct participant signatures. Account Keychain
+access keys are not accepted for intents or unrestricted states because its
+transaction limits do not constrain arbitrary off-chain signatures.
 
-**How a participant delegates a session key** (entirely outside this
-contract, from their own wallet):
+For automated state signing, a participant signs this EIP-712 capability:
 
 ```solidity
-function authorizeKey(address keyId, SignatureType signatureType, KeyRestrictions calldata config) external
+struct ChannelCapability {
+    uint8 protocolVersion;
+    bytes32 channelId;
+    address participant;
+    address delegatedSigner;
+    address counterparty;
+    address token;
+    uint128 baselineBalance;
+    uint128 maxNetSpend;
+    uint256 capabilityNonce;
+}
+
+struct StateAuthorization {
+    bytes stateSignature;
+    ChannelCapability capability;
+    bytes capabilitySignature;
+}
 ```
 
-called on the Account Keychain precompile, where `keyId` is the delegated
-key's address and `config.expiry` sets when it stops working. The
-participant can revoke it early at any time with `revokeKey(keyId)`.
+`capabilitySignature` is the participant account's EIP-712 signature over
+the capability. `stateSignature` is the delegated key's signature over the
+normal `ChannelState`. The contract checks both with TIP-1020.
 
-**How this contract checks it**: when verifying a signature against
-`participant`, `_isValidSignature` first tries the participant's own
-address via TIP-1020 `recover`; if that doesn't match, it calls
-`ACCOUNT_KEYCHAIN.getKey(participant, recoveredSigner)` and accepts the
-signature only if the returned key is **not revoked and not expired**
-(`!isRevoked && block.timestamp < expiry`). This applies uniformly to every
-signature check in the contract — open, join, cooperative close, initiate
-close, challenge.
+The enforced balance floor is:
 
-**What this does and does not give you:**
-- ✅ Real, chain-enforced expiry and instant revocation. A participant
-  revokes a compromised session key from their wallet and it stops working
-  in every open channel immediately — nothing to do on this contract's side.
-- ❌ **No automatic per-channel spend cap.** Account Keychain's spending
-  limits and call scopes are enforced by Tempo's protocol only for a key's
-  *own direct* on-chain TIP-20 `transfer`/`transferWithMemo`/`approve` calls
-  as a transaction signer — they do not apply to an arbitrary off-chain-signed
-  `ChannelState` this contract verifies independently. If a relay/client
-  needs to bound how much a delegated key can authorize within a channel,
-  that has to be enforced at the relay/SDK layer (e.g. refuse to countersign
-  or forward a state that exceeds an agreed cap) — this contract does not do
-  it for you.
-- The relay doesn't need to construct or sign anything for this — it just
-  needs to accept signatures from whichever key the client hands it (their
-  root key or a delegated one) and pass them straight through. If a
-  signature that used to work suddenly gets rejected with `InvalidSignature`,
-  check whether the signing key was revoked or expired before assuming
-  something else broke.
+```text
+minimum participant balance = baselineBalance - maxNetSpend
+```
+
+This is a maximum *net loss* of the participant's chosen baseline. Receiving
+funds does not consume the budget, and either participant can independently
+delegate its side of the same bidirectional channel.
+
+Capabilities have no on-chain expiry or revocation lookup. This is
+intentional: a state honestly signed before a separate key revocation must
+remain enforceable during a later dispute. Clients stop using an agent key at
+their configured off-chain expiry; the root account closes the channel to end
+the capability permanently. The fixed net-spend ceiling limits exposure if an
+old key is compromised before closure.
+
+The plain `cooperativeClose`/`initiateClose`/`challenge` functions accept only
+direct participant signatures. Capability-bearing states use the corresponding
+`WithCapabilities` variant. A relay should reject an Account Keychain-only
+intent or state authorization before submitting it.
 
 ## Errors the relay should handle gracefully
 
 `InvalidProtocolVersion`, `InvalidParticipants`, `InvalidToken`,
 `InvalidChallengeDuration`, `IntentExpired`, `IntentNotYetValid`,
 `ChannelAlreadyExists`, `ChannelNotPending`, `ChannelNotOpen`,
-`ChannelNotClosing`, `InvalidSignature`, `StaleNonce`, `NotNewerNonce`,
+`ChannelNotClosing`, `InvalidSignature`, `InvalidCapability`,
+`CapabilitySpendExceeded`, `StaleNonce`, `NotNewerNonce`,
 `BalanceSumMismatch`, `ChallengeWindowActive`, `ChallengeWindowExpired`,
 `TransferFailed`, `ReceiptMismatch`, `NotAuthorizedToRedirect`,
 `NoBlockedPayout`.
@@ -369,12 +417,9 @@ discovering them from a reverted transaction.
 
 ## What the relay must never do
 
-- Never construct or sign a `ChannelIntent`/`ChannelState` on a
-  participant's behalf — it has no keys for either participant. If a
-  participant has delegated a session key to it via Tempo's Account
-  Keychain (see above), that's the one exception, and only within the
-  expiry/revocation the participant set — the relay does not get to decide
-  when that delegation ends, the participant does, from their own wallet.
+- Never construct or sign a `ChannelIntent`, `ChannelCapability`, or
+  `ChannelState` on a participant's behalf. Agent keys belong in the client
+  or agent runtime; the relay only transports signed data.
 - Never assume a `transfer`/`transferFrom` call reverting means "nothing
   happened" without also checking for the TIP-403 redirect case.
 - Never trust a self-reported balance over the contract's `getChannel`

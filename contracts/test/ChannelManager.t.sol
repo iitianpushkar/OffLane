@@ -72,6 +72,9 @@ contract ChannelManagerTest is Test {
     );
     bytes32 internal constant CHANNEL_STATE_TYPEHASH =
         keccak256("ChannelState(bytes32 channelId,uint64 nonce,uint128 balanceA,uint128 balanceB,bytes32 appDataHash)");
+    bytes32 internal constant CHANNEL_CAPABILITY_TYPEHASH = keccak256(
+        "ChannelCapability(uint8 protocolVersion,bytes32 channelId,address participant,address delegatedSigner,address counterparty,address token,uint128 baselineBalance,uint128 maxNetSpend,uint256 capabilityNonce)"
+    );
 
     function setUp() public {
         alice = vm.addr(alicePk);
@@ -158,6 +161,89 @@ contract ChannelManagerTest is Test {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), _hashState(state)));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    function _hashCapability(ChannelManager.ChannelCapability memory capability) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                CHANNEL_CAPABILITY_TYPEHASH,
+                capability.protocolVersion,
+                capability.channelId,
+                capability.participant,
+                capability.delegatedSigner,
+                capability.counterparty,
+                capability.token,
+                capability.baselineBalance,
+                capability.maxNetSpend,
+                capability.capabilityNonce
+            )
+        );
+    }
+
+    function _signCapability(ChannelManager.ChannelCapability memory capability, uint256 ownerPk)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), _hashCapability(capability)));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerPk, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _capability(
+        bytes32 channelId,
+        address participant,
+        address delegatedSigner,
+        uint128 baselineBalance,
+        uint128 maxNetSpend,
+        uint256 capabilityNonce
+    ) internal view returns (ChannelManager.ChannelCapability memory) {
+        return ChannelManager.ChannelCapability({
+            protocolVersion: manager.PROTOCOL_VERSION(),
+            channelId: channelId,
+            participant: participant,
+            delegatedSigner: delegatedSigner,
+            counterparty: participant == alice ? bob : alice,
+            token: address(token),
+            baselineBalance: baselineBalance,
+            maxNetSpend: maxNetSpend,
+            capabilityNonce: capabilityNonce
+        });
+    }
+
+    function _directAuthorization(ChannelManager.ChannelState memory state, uint256 pk)
+        internal
+        view
+        returns (ChannelManager.StateAuthorization memory)
+    {
+        return ChannelManager.StateAuthorization({
+            stateSignature: _signState(state, pk),
+            capability: ChannelManager.ChannelCapability({
+                protocolVersion: 0,
+                channelId: bytes32(0),
+                participant: address(0),
+                delegatedSigner: address(0),
+                counterparty: address(0),
+                token: address(0),
+                baselineBalance: 0,
+                maxNetSpend: 0,
+                capabilityNonce: 0
+            }),
+            capabilitySignature: bytes("")
+        });
+    }
+
+    function _capabilityAuthorization(
+        ChannelManager.ChannelState memory state,
+        ChannelManager.ChannelCapability memory capability,
+        uint256 delegatePk,
+        uint256 ownerPk
+    ) internal view returns (ChannelManager.StateAuthorization memory) {
+        return ChannelManager.StateAuthorization({
+            stateSignature: _signState(state, delegatePk),
+            capability: capability,
+            capabilitySignature: _signCapability(capability, ownerPk)
+        });
     }
 
     function _openAndJoin(uint128 depositA, uint128 depositB, uint256 salt)
@@ -328,7 +414,7 @@ contract ChannelManagerTest is Test {
     }
 
     // ------------------------------------------------------------------
-    // Account Keychain delegated session keys
+    // Channel-scoped agent capabilities
     // ------------------------------------------------------------------
 
     function _authorizeAccessKey(address root, address keyId, uint64 expiry) internal {
@@ -344,7 +430,7 @@ contract ChannelManagerTest is Test {
             .authorizeKey(keyId, IAccountKeychainTestHelper.SignatureType.Secp256k1, config);
     }
 
-    function test_SessionKey_DelegatedViaAccountKeychainIsAccepted() public {
+    function test_RevertWhen_AccountKeychainKeySignsStateWithoutCapability() public {
         (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 50);
 
         uint256 sessionPk = 0x5E5510101;
@@ -354,71 +440,191 @@ contract ChannelManagerTest is Test {
         ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
             channelId: channelId, nonce: 1, balanceA: 60e6, balanceB: 140e6, appDataHash: bytes32(0)
         });
-        // Alice signs with her DELEGATED session key, not her root key.
+        // Account Keychain authorization alone is intentionally insufficient
+        // for a balance state because it has no channel-specific spending cap.
         bytes memory sigA = _signState(state, sessionPk);
         bytes memory sigB = _signState(state, bobPk);
 
-        uint256 aliceBefore = token.balanceOf(alice);
+        vm.expectRevert(ChannelManager.InvalidSignature.selector);
         manager.cooperativeClose(state, sigA, sigB);
-        assertEq(token.balanceOf(alice), aliceBefore + 60e6, "payout still goes to alice, the root account");
     }
 
-    function test_RevertWhen_AccountKeychainKeyIsExpired() public {
+    function test_RevertWhen_AccountKeychainKeySignsFundingIntent() public {
+        uint256 sessionPk = 0x5E5510108;
+        address sessionKey = vm.addr(sessionPk);
+        _authorizeAccessKey(alice, sessionKey, uint64(block.timestamp + 1 days));
+
+        ChannelManager.ChannelIntent memory intent = _defaultIntent(100e6, 100e6, 58);
+        bytes memory sessionSignature = _signIntent(intent, sessionPk);
+
+        vm.expectRevert(ChannelManager.InvalidSignature.selector);
+        manager.openChannel(intent, sessionSignature);
+    }
+
+    function test_Capability_AllowsAliceToSpendWithinNetLimit() public {
         (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 51);
 
         uint256 sessionPk = 0x5E5510102;
         address sessionKey = vm.addr(sessionPk);
-        _authorizeAccessKey(alice, sessionKey, uint64(block.timestamp + 1 hours));
-
-        vm.warp(block.timestamp + 2 hours); // past expiry
+        ChannelManager.ChannelCapability memory capability = _capability(channelId, alice, sessionKey, 100e6, 20e6, 1);
 
         ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
-            channelId: channelId, nonce: 1, balanceA: 60e6, balanceB: 140e6, appDataHash: bytes32(0)
+            channelId: channelId, nonce: 1, balanceA: 80e6, balanceB: 120e6, appDataHash: bytes32(0)
         });
-        bytes memory sigA = _signState(state, sessionPk);
-        bytes memory sigB = _signState(state, bobPk);
 
-        vm.expectRevert(ChannelManager.InvalidSignature.selector);
-        manager.cooperativeClose(state, sigA, sigB);
+        uint256 aliceBefore = token.balanceOf(alice);
+        manager.cooperativeCloseWithCapabilities(
+            state, _capabilityAuthorization(state, capability, sessionPk, alicePk), _directAuthorization(state, bobPk)
+        );
+        assertEq(token.balanceOf(alice), aliceBefore + 80e6, "capability payout goes to root account");
     }
 
-    function test_RevertWhen_AccountKeychainKeyIsRevoked() public {
+    function test_RevertWhen_CapabilityExceedsAliceNetSpendLimit() public {
         (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 52);
 
         uint256 sessionPk = 0x5E5510103;
         address sessionKey = vm.addr(sessionPk);
-        _authorizeAccessKey(alice, sessionKey, uint64(block.timestamp + 1 days));
+        ChannelManager.ChannelCapability memory capability = _capability(channelId, alice, sessionKey, 100e6, 20e6, 2);
 
+        ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 1, balanceA: 79e6, balanceB: 121e6, appDataHash: bytes32(0)
+        });
+        ChannelManager.StateAuthorization memory authorizationA =
+            _capabilityAuthorization(state, capability, sessionPk, alicePk);
+        ChannelManager.StateAuthorization memory authorizationB = _directAuthorization(state, bobPk);
+
+        vm.expectRevert(ChannelManager.CapabilitySpendExceeded.selector);
+        manager.cooperativeCloseWithCapabilities(state, authorizationA, authorizationB);
+    }
+
+    function test_Capability_AllowsBobToPayAliceInReverseDirection() public {
+        (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 53);
+
+        uint256 sessionPk = 0x5E5510104;
+        address sessionKey = vm.addr(sessionPk);
+        ChannelManager.ChannelCapability memory capability = _capability(channelId, bob, sessionKey, 100e6, 10e6, 3);
+
+        ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 1, balanceA: 110e6, balanceB: 90e6, appDataHash: bytes32(0)
+        });
+
+        manager.cooperativeCloseWithCapabilities(
+            state, _directAuthorization(state, alicePk), _capabilityAuthorization(state, capability, sessionPk, bobPk)
+        );
+    }
+
+    function test_Capabilities_WorkDuringCloseAndBidirectionalChallenge() public {
+        (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 57);
+
+        uint256 aliceSessionPk = 0x5E5510110;
+        uint256 bobSessionPk = 0x5E5510111;
+        ChannelManager.ChannelCapability memory aliceCapability =
+            _capability(channelId, alice, vm.addr(aliceSessionPk), 100e6, 30e6, 7);
+        ChannelManager.ChannelCapability memory bobCapability =
+            _capability(channelId, bob, vm.addr(bobSessionPk), 100e6, 30e6, 8);
+
+        // Alice pays Bob 20 and either agent can initiate settlement using the
+        // fully signed state plus their channel-scoped authorizations.
+        ChannelManager.ChannelState memory first = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 1, balanceA: 80e6, balanceB: 120e6, appDataHash: bytes32(0)
+        });
+        manager.initiateCloseWithCapabilities(
+            first,
+            _capabilityAuthorization(first, aliceCapability, aliceSessionPk, alicePk),
+            _capabilityAuthorization(first, bobCapability, bobSessionPk, bobPk)
+        );
+
+        // Bob subsequently pays Alice 10. The newer reverse-direction state
+        // overrides the first state without either root wallet signing it.
+        ChannelManager.ChannelState memory second = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 2, balanceA: 90e6, balanceB: 110e6, appDataHash: bytes32(0)
+        });
+        manager.challengeWithCapabilities(
+            second,
+            _capabilityAuthorization(second, aliceCapability, aliceSessionPk, alicePk),
+            _capabilityAuthorization(second, bobCapability, bobSessionPk, bobPk)
+        );
+
+        ChannelManager.Channel memory channel = manager.getChannel(channelId);
+        assertEq(channel.nonce, 2);
+        assertEq(channel.balanceA, 90e6);
+        assertEq(channel.balanceB, 110e6);
+    }
+
+    function test_RevertWhen_CapabilityTargetsWrongChannel() public {
+        (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 54);
+
+        uint256 sessionPk = 0x5E5510105;
+        ChannelManager.ChannelCapability memory capability =
+            _capability(bytes32(uint256(channelId) + 1), alice, vm.addr(sessionPk), 100e6, 20e6, 4);
+        ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 1, balanceA: 80e6, balanceB: 120e6, appDataHash: bytes32(0)
+        });
+        ChannelManager.StateAuthorization memory authorizationA =
+            _capabilityAuthorization(state, capability, sessionPk, alicePk);
+        ChannelManager.StateAuthorization memory authorizationB = _directAuthorization(state, bobPk);
+
+        vm.expectRevert(ChannelManager.InvalidCapability.selector);
+        manager.cooperativeCloseWithCapabilities(state, authorizationA, authorizationB);
+    }
+
+    function test_CapabilityEvidenceSurvivesAccountKeychainRevocation() public {
+        (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 55);
+
+        uint256 sessionPk = 0x5E5510106;
+        address sessionKey = vm.addr(sessionPk);
+        _authorizeAccessKey(alice, sessionKey, uint64(block.timestamp + 1 days));
+        ChannelManager.ChannelCapability memory capability = _capability(channelId, alice, sessionKey, 100e6, 20e6, 5);
+        ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 1, balanceA: 80e6, balanceB: 120e6, appDataHash: bytes32(0)
+        });
+        ChannelManager.StateAuthorization memory authorizationA =
+            _capabilityAuthorization(state, capability, sessionPk, alicePk);
+
+        // Revocation blocks new Account Keychain actions, but must not destroy
+        // previously signed, channel-capped settlement evidence.
         vm.prank(alice);
         IAccountKeychainTestHelper(ACCOUNT_KEYCHAIN_ADDR).revokeKey(sessionKey);
 
-        ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
-            channelId: channelId, nonce: 1, balanceA: 60e6, balanceB: 140e6, appDataHash: bytes32(0)
-        });
-        bytes memory sigA = _signState(state, sessionPk);
-        bytes memory sigB = _signState(state, bobPk);
-
-        vm.expectRevert(ChannelManager.InvalidSignature.selector);
-        manager.cooperativeClose(state, sigA, sigB);
+        manager.cooperativeCloseWithCapabilities(state, authorizationA, _directAuthorization(state, bobPk));
     }
 
-    function test_RevertWhen_KeyDelegatedByWrongParticipantIsUsed() public {
-        (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 53);
+    function test_RevertWhen_CapabilityIsNotSignedByItsParticipant() public {
+        (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 56);
 
-        // Bob delegates a session key to himself...
-        uint256 sessionPk = 0x5E5510104;
-        address sessionKey = vm.addr(sessionPk);
-        _authorizeAccessKey(bob, sessionKey, uint64(block.timestamp + 1 days));
-
-        // ...but it's presented as if it were authorized to sign for Alice.
+        uint256 sessionPk = 0x5E5510107;
+        ChannelManager.ChannelCapability memory capability =
+            _capability(channelId, alice, vm.addr(sessionPk), 100e6, 20e6, 6);
         ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
-            channelId: channelId, nonce: 1, balanceA: 60e6, balanceB: 140e6, appDataHash: bytes32(0)
+            channelId: channelId, nonce: 1, balanceA: 80e6, balanceB: 120e6, appDataHash: bytes32(0)
         });
-        bytes memory sigA = _signState(state, sessionPk);
-        bytes memory sigB = _signState(state, bobPk);
+        ChannelManager.StateAuthorization memory authorizationA =
+            _capabilityAuthorization(state, capability, sessionPk, bobPk);
+        ChannelManager.StateAuthorization memory authorizationB = _directAuthorization(state, bobPk);
 
-        vm.expectRevert(ChannelManager.InvalidSignature.selector);
-        manager.cooperativeClose(state, sigA, sigB);
+        vm.expectRevert(ChannelManager.InvalidCapability.selector);
+        manager.cooperativeCloseWithCapabilities(state, authorizationA, authorizationB);
+    }
+
+    function testFuzz_CapabilityEnforcesAliceBalanceFloor(uint128 limit, uint128 spend) public {
+        limit = uint128(bound(limit, 0, 100e6));
+        spend = uint128(bound(spend, 0, 100e6));
+        (bytes32 channelId,) = _openAndJoin(100e6, 100e6, uint256(keccak256(abi.encode(limit, spend))));
+
+        uint256 sessionPk = 0x5E5510112;
+        ChannelManager.ChannelCapability memory capability =
+            _capability(channelId, alice, vm.addr(sessionPk), 100e6, limit, 9);
+        ChannelManager.ChannelState memory state = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 1, balanceA: 100e6 - spend, balanceB: 100e6 + spend, appDataHash: bytes32(0)
+        });
+        ChannelManager.StateAuthorization memory authorizationA =
+            _capabilityAuthorization(state, capability, sessionPk, alicePk);
+        ChannelManager.StateAuthorization memory authorizationB = _directAuthorization(state, bobPk);
+
+        if (spend > limit) {
+            vm.expectRevert(ChannelManager.CapabilitySpendExceeded.selector);
+        }
+        manager.cooperativeCloseWithCapabilities(state, authorizationA, authorizationB);
     }
 
     // ------------------------------------------------------------------

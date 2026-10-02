@@ -1,3 +1,4 @@
+export * from "./capability.js";
 export * from "./collision.js";
 export * from "./errors.js";
 export * from "./hashing.js";

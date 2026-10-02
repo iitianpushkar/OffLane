@@ -6,7 +6,6 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {ITIP20} from "./interfaces/ITIP20.sol";
 import {ITempoSignatureVerifier} from "./interfaces/ITempoSignatureVerifier.sol";
 import {IReceivePolicyGuard} from "./interfaces/IReceivePolicyGuard.sol";
-import {IAccountKeychain} from "./interfaces/IAccountKeychain.sol";
 
 /// @title ChannelManager
 /// @notice Two-party, bidirectional, collateralized state-channel contract for
@@ -35,23 +34,15 @@ import {IAccountKeychain} from "./interfaces/IAccountKeychain.sol";
 ///   state than the one used to start the close. This is simpler than a
 ///   single-challenger-signature scheme because every valid state was
 ///   agreed by both parties at the moment it was signed off-chain.
-/// - Session/delegated signing keys are NOT tracked in this contract's own
-///   storage. A participant delegates a channel-scoped signing key entirely
-///   through Tempo's native Account Keychain precompile (`authorizeKey`, on
-///   their own wallet/account, outside this contract) — this contract just
-///   *queries* that precompile (`getKey`) to check whether the recovered
-///   signer is a currently active (non-revoked, non-expired) access key of
-///   the participant. This gets real, chain-enforced expiry and instant
-///   revocation "for free": a participant can revoke a compromised session
-///   key at any time via a normal wallet action, and it takes effect in
-///   every open channel immediately, with no per-channel state to update
-///   here. Note this does NOT get per-channel spend caps for free — Account
-///   Keychain's spending limits only apply to a key's own direct TIP-20
-///   `transfer`/`transferWithMemo`/`approve` calls as a transaction signer,
-///   not to arbitrary off-chain-signed messages like `ChannelState` that
-///   this contract verifies independently. A per-channel spend cap on a
-///   delegated signer, if ever needed, would have to be this contract's own
-///   feature, not inherited from Account Keychain.
+/// - Channel intents require direct participant signatures because an
+///   account-wide delegate must not be able to choose an arbitrary deposit.
+///   Automated state signing uses a root-signed `ChannelCapability` that
+///   binds one delegate to one channel, peer, token, baseline balance and
+///   maximum net spend. The capability is supplied only during enforcement,
+///   so it costs no per-channel storage. It deliberately remains valid as
+///   settlement evidence after the key is expired or revoked elsewhere:
+///   otherwise revocation could destroy a participant's ability to enforce
+///   an honestly signed earlier state.
 contract ChannelManager is EIP712, ReentrancyGuard {
     // =========================================================================
     //                                Constants
@@ -69,15 +60,16 @@ contract ChannelManager is EIP712, ReentrancyGuard {
     IReceivePolicyGuard internal constant RECEIVE_POLICY_GUARD =
         IReceivePolicyGuard(0xB10C000000000000000000000000000000000000);
 
-    /// @dev Tempo's Account Keychain precompile, fixed system address.
-    IAccountKeychain internal constant ACCOUNT_KEYCHAIN = IAccountKeychain(0xaAAAaaAA00000000000000000000000000000000);
-
     bytes32 private constant CHANNEL_INTENT_TYPEHASH = keccak256(
         "ChannelIntent(uint8 protocolVersion,address participantA,address participantB,address token,uint128 depositA,uint128 depositB,uint32 challengeDuration,uint32 validUntil,uint256 salt)"
     );
 
     bytes32 private constant CHANNEL_STATE_TYPEHASH =
         keccak256("ChannelState(bytes32 channelId,uint64 nonce,uint128 balanceA,uint128 balanceB,bytes32 appDataHash)");
+
+    bytes32 private constant CHANNEL_CAPABILITY_TYPEHASH = keccak256(
+        "ChannelCapability(uint8 protocolVersion,bytes32 channelId,address participant,address delegatedSigner,address counterparty,address token,uint128 baselineBalance,uint128 maxNetSpend,uint256 capabilityNonce)"
+    );
 
     // =========================================================================
     //                                  Types
@@ -114,6 +106,30 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         uint128 balanceA;
         uint128 balanceB;
         bytes32 appDataHash; // opaque hash binding e.g. an encrypted message reference
+    }
+
+    /// @notice Root-signed authority for an automated key to sign states for
+    /// one participant in one channel. `maxNetSpend` limits how far the
+    /// participant's enforced balance may fall below `baselineBalance`.
+    struct ChannelCapability {
+        uint8 protocolVersion;
+        bytes32 channelId;
+        address participant;
+        address delegatedSigner;
+        address counterparty;
+        address token;
+        uint128 baselineBalance;
+        uint128 maxNetSpend;
+        uint256 capabilityNonce;
+    }
+
+    /// @notice State signature plus optional root-signed capability. An empty
+    /// `capabilitySignature` means `stateSignature` must be from the participant
+    /// account itself. A non-empty one enables the constrained delegate path.
+    struct StateAuthorization {
+        bytes stateSignature;
+        ChannelCapability capability;
+        bytes capabilitySignature;
     }
 
     /// @dev Packed into 4 storage slots (32 bytes each):
@@ -196,6 +212,8 @@ contract ChannelManager is EIP712, ReentrancyGuard {
     error ChannelNotOpen();
     error ChannelNotClosing();
     error InvalidSignature();
+    error InvalidCapability();
+    error CapabilitySpendExceeded();
     error StaleNonce();
     error NotNewerNonce();
     error BalanceSumMismatch();
@@ -239,7 +257,7 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         channelId = _computeChannelId(intent);
         if (_usedChannelIds[channelId]) revert ChannelAlreadyExists();
 
-        if (!_isValidSignature(_hashIntent(intent), signatureA, intent.participantA)) {
+        if (!_isValidDirectSignature(_hashIntent(intent), signatureA, intent.participantA)) {
             revert InvalidSignature();
         }
 
@@ -287,7 +305,7 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         if (ch.status != Status.PENDING) revert ChannelNotPending();
         if (block.timestamp >= intent.validUntil) revert IntentExpired();
 
-        if (!_isValidSignature(_hashIntent(intent), signatureB, intent.participantB)) {
+        if (!_isValidDirectSignature(_hashIntent(intent), signatureB, intent.participantB)) {
             revert InvalidSignature();
         }
 
@@ -340,7 +358,21 @@ contract ChannelManager is EIP712, ReentrancyGuard {
     {
         Channel storage ch = _channels[state.channelId];
         if (ch.status != Status.OPEN && ch.status != Status.CLOSING) revert ChannelNotOpen();
-        _requireValidTransition(ch, state, signatureA, signatureB);
+        _requireValidTransition(ch, state, _directAuthorization(signatureA), _directAuthorization(signatureB));
+
+        _settle(state.channelId, ch, state.balanceA, state.balanceB);
+    }
+
+    /// @notice Capability-aware cooperative close. Each participant may use
+    /// either a direct account signature or a constrained delegated signer.
+    function cooperativeCloseWithCapabilities(
+        ChannelState calldata state,
+        StateAuthorization calldata authorizationA,
+        StateAuthorization calldata authorizationB
+    ) external nonReentrant {
+        Channel storage ch = _channels[state.channelId];
+        if (ch.status != Status.OPEN && ch.status != Status.CLOSING) revert ChannelNotOpen();
+        _requireValidTransition(ch, state, authorizationA, authorizationB);
 
         _settle(state.channelId, ch, state.balanceA, state.balanceB);
     }
@@ -354,8 +386,25 @@ contract ChannelManager is EIP712, ReentrancyGuard {
     {
         Channel storage ch = _channels[state.channelId];
         if (ch.status != Status.OPEN) revert ChannelNotOpen();
-        _requireValidTransition(ch, state, signatureA, signatureB);
+        _requireValidTransition(ch, state, _directAuthorization(signatureA), _directAuthorization(signatureB));
 
+        _startClose(ch, state);
+    }
+
+    /// @notice Capability-aware unilateral-close initiation.
+    function initiateCloseWithCapabilities(
+        ChannelState calldata state,
+        StateAuthorization calldata authorizationA,
+        StateAuthorization calldata authorizationB
+    ) external nonReentrant {
+        Channel storage ch = _channels[state.channelId];
+        if (ch.status != Status.OPEN) revert ChannelNotOpen();
+        _requireValidTransition(ch, state, authorizationA, authorizationB);
+
+        _startClose(ch, state);
+    }
+
+    function _startClose(Channel storage ch, ChannelState calldata state) internal {
         ch.nonce = state.nonce;
         ch.balanceA = state.balanceA;
         ch.balanceB = state.balanceB;
@@ -379,8 +428,29 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         if (ch.status != Status.CLOSING) revert ChannelNotClosing();
         if (block.timestamp > ch.challengeExpireAt) revert ChallengeWindowExpired();
         if (newerState.nonce <= ch.nonce) revert NotNewerNonce();
-        _requireValidSignaturesAndBalance(ch, newerState, signatureA, signatureB);
+        _requireValidSignaturesAndBalance(
+            ch, newerState, _directAuthorization(signatureA), _directAuthorization(signatureB)
+        );
 
+        _recordChallenge(ch, newerState);
+    }
+
+    /// @notice Capability-aware challenge with a strictly newer state.
+    function challengeWithCapabilities(
+        ChannelState calldata newerState,
+        StateAuthorization calldata authorizationA,
+        StateAuthorization calldata authorizationB
+    ) external nonReentrant {
+        Channel storage ch = _channels[newerState.channelId];
+        if (ch.status != Status.CLOSING) revert ChannelNotClosing();
+        if (block.timestamp > ch.challengeExpireAt) revert ChallengeWindowExpired();
+        if (newerState.nonce <= ch.nonce) revert NotNewerNonce();
+        _requireValidSignaturesAndBalance(ch, newerState, authorizationA, authorizationB);
+
+        _recordChallenge(ch, newerState);
+    }
+
+    function _recordChallenge(Channel storage ch, ChannelState calldata newerState) internal {
         ch.nonce = newerState.nonce;
         ch.balanceA = newerState.balanceA;
         ch.balanceB = newerState.balanceB;
@@ -438,26 +508,76 @@ contract ChannelManager is EIP712, ReentrancyGuard {
     function _requireValidTransition(
         Channel storage ch,
         ChannelState calldata state,
-        bytes calldata signatureA,
-        bytes calldata signatureB
+        StateAuthorization memory authorizationA,
+        StateAuthorization memory authorizationB
     ) internal view {
         if (state.nonce < ch.nonce) revert StaleNonce();
-        _requireValidSignaturesAndBalance(ch, state, signatureA, signatureB);
+        _requireValidSignaturesAndBalance(ch, state, authorizationA, authorizationB);
     }
 
     function _requireValidSignaturesAndBalance(
         Channel storage ch,
         ChannelState calldata state,
-        bytes calldata signatureA,
-        bytes calldata signatureB
+        StateAuthorization memory authorizationA,
+        StateAuthorization memory authorizationB
     ) internal view {
         if (uint256(state.balanceA) + uint256(state.balanceB) != uint256(ch.balanceA) + uint256(ch.balanceB)) {
             revert BalanceSumMismatch();
         }
 
         bytes32 digest = _hashState(state);
-        if (!_isValidSignature(digest, signatureA, ch.participantA)) revert InvalidSignature();
-        if (!_isValidSignature(digest, signatureB, ch.participantB)) revert InvalidSignature();
+        _requireParticipantAuthorization(
+            ch, state, digest, authorizationA, ch.participantA, ch.participantB, state.balanceA
+        );
+        _requireParticipantAuthorization(
+            ch, state, digest, authorizationB, ch.participantB, ch.participantA, state.balanceB
+        );
+    }
+
+    function _requireParticipantAuthorization(
+        Channel storage ch,
+        ChannelState calldata state,
+        bytes32 stateDigest,
+        StateAuthorization memory authorization,
+        address participant,
+        address counterparty,
+        uint128 participantBalance
+    ) internal view {
+        if (authorization.capabilitySignature.length == 0) {
+            if (!_isValidDirectSignature(stateDigest, authorization.stateSignature, participant)) {
+                revert InvalidSignature();
+            }
+            return;
+        }
+
+        ChannelCapability memory capability = authorization.capability;
+        if (
+            capability.protocolVersion != PROTOCOL_VERSION || capability.channelId != state.channelId
+                || capability.participant != participant || capability.delegatedSigner == address(0)
+                || capability.counterparty != counterparty || capability.token != ch.token
+                || capability.maxNetSpend > capability.baselineBalance
+                || capability.baselineBalance > uint256(state.balanceA) + uint256(state.balanceB)
+        ) {
+            revert InvalidCapability();
+        }
+
+        (bool stateSignatureValid, address stateSigner) = _recoverSigner(stateDigest, authorization.stateSignature);
+        if (!stateSignatureValid || stateSigner != capability.delegatedSigner) revert InvalidSignature();
+
+        if (!_isValidDirectSignature(_hashCapability(capability), authorization.capabilitySignature, participant)) {
+            revert InvalidCapability();
+        }
+
+        uint128 minimumBalance = capability.baselineBalance - capability.maxNetSpend;
+        if (participantBalance < minimumBalance) revert CapabilitySpendExceeded();
+    }
+
+    function _directAuthorization(bytes calldata signature)
+        internal
+        pure
+        returns (StateAuthorization memory authorization)
+    {
+        authorization.stateSignature = signature;
     }
 
     /// @dev Pays out `payoutA`/`payoutB`, deletes the channel (storage
@@ -546,42 +666,20 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         emit BlockedPayoutRescued(channelId, participant, token, pending, to);
     }
 
-    /// @dev Uses Tempo's TIP-1020 precompile instead of a hardcoded ECDSA
-    /// check, so participants can sign channel states with any Tempo
-    /// signature type (secp256k1, P256, or WebAuthn/passkey) and the
-    /// contract keeps working if Tempo adds new account/signature types
-    /// later — this contract never needs to be redeployed for that.
-    /// `recover` reverts on a malformed signature; that's caught and
-    /// treated as "not valid" rather than reverting the whole transaction,
-    /// since a malformed signature from a delegated key shouldn't prevent
-    /// falling through to check whether it's the participant's own key (or
-    /// vice versa).
-    ///
-    /// A signature from an address other than `participant` itself is only
-    /// accepted if it's a currently active (non-revoked, non-expired) Tempo
-    /// Account Keychain access key delegated by `participant` — queried live
-    /// against the real precompile, not tracked in this contract's own
-    /// storage. See the contract-level dev note for what this does and does
-    /// not cover.
-    function _isValidSignature(bytes32 digest, bytes calldata signature, address participant)
+    function _isValidDirectSignature(bytes32 digest, bytes memory signature, address participant)
         internal
         view
         returns (bool)
     {
-        try SIGNATURE_VERIFIER.recover(digest, signature) returns (address signer) {
-            return signer == participant || _isActiveAccessKey(participant, signer);
-        } catch {
-            return false;
-        }
+        (bool valid, address signer) = _recoverSigner(digest, signature);
+        return valid && signer == participant;
     }
 
-    /// @dev Whether `keyId` is a currently active (non-revoked, non-expired)
-    /// Tempo Account Keychain access key delegated by `account`.
-    function _isActiveAccessKey(address account, address keyId) internal view returns (bool) {
-        try ACCOUNT_KEYCHAIN.getKey(account, keyId) returns (IAccountKeychain.KeyInfo memory key) {
-            return !key.isRevoked && block.timestamp < key.expiry;
+    function _recoverSigner(bytes32 digest, bytes memory signature) internal view returns (bool valid, address signer) {
+        try SIGNATURE_VERIFIER.recover(digest, signature) returns (address recovered) {
+            return (true, recovered);
         } catch {
-            return false;
+            return (false, address(0));
         }
     }
 
@@ -607,6 +705,24 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         bytes32 structHash = keccak256(
             abi.encode(
                 CHANNEL_STATE_TYPEHASH, state.channelId, state.nonce, state.balanceA, state.balanceB, state.appDataHash
+            )
+        );
+        return _hashTypedDataV4(structHash);
+    }
+
+    function _hashCapability(ChannelCapability memory capability) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                CHANNEL_CAPABILITY_TYPEHASH,
+                capability.protocolVersion,
+                capability.channelId,
+                capability.participant,
+                capability.delegatedSigner,
+                capability.counterparty,
+                capability.token,
+                capability.baselineBalance,
+                capability.maxNetSpend,
+                capability.capabilityNonce
             )
         );
         return _hashTypedDataV4(structHash);

@@ -9,6 +9,7 @@ import type {
 
 export const UINT64_MAX = (1n << 64n) - 1n;
 export const UINT128_MAX = (1n << 128n) - 1n;
+export const UINT256_MAX = (1n << 256n) - 1n;
 
 function sameAddress(left: Address, right: Address): boolean {
   return left.toLowerCase() === right.toLowerCase();

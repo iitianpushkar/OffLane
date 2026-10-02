@@ -10,10 +10,40 @@ export interface ChannelState {
   appDataHash: Bytes32;
 }
 
+export interface ChannelCapability {
+  protocolVersion: number;
+  channelId: Bytes32;
+  participant: Address;
+  delegatedSigner: Address;
+  counterparty: Address;
+  token: Address;
+  baselineBalance: bigint;
+  maxNetSpend: bigint;
+  capabilityNonce: bigint;
+}
+
+export type StateAuthorization =
+  | {
+      kind: "direct";
+      stateSignature: Hex;
+    }
+  | {
+      kind: "capability";
+      stateSignature: Hex;
+      capability: ChannelCapability;
+      capabilitySignature: Hex;
+    };
+
 export interface ChannelContext {
   participantA: Address;
   participantB: Address;
   current: ChannelState;
+}
+
+export interface ChannelTerms {
+  participantA: Address;
+  participantB: Address;
+  token: Address;
 }
 
 export interface PaymentTransfer {
