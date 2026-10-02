@@ -5,6 +5,7 @@ import type {
   Bytes32,
   ChannelCapability,
   ChannelState,
+  StateAuthorization,
 } from "./types.js";
 
 const canonicalUint = z
@@ -88,24 +89,13 @@ export const stateAuthorizationWireSchema = z.discriminatedUnion("kind", [
 ]);
 
 export const protocolMethodSchema = z.enum([
-  "channel.state.propose",
-  "channel.state.accept",
-  "channel.state.reject",
-  "channel.state.sync",
+  "node.v1.ping",
+  "channels.v1.propose_state",
+  "channels.v1.accept_state",
+  "channels.v1.reject_state",
+  "channels.v1.get_state",
+  "channels.v1.state_updated",
 ]);
-
-export const protocolEnvelopeSchema = z
-  .object({
-    version: z.literal(1),
-    kind: z.enum(["request", "response", "event", "error"]),
-    id: z.string().min(1).max(128),
-    method: protocolMethodSchema,
-    timestamp: z.number().int().nonnegative(),
-    sequence: uint64StringSchema,
-    payload: z.unknown(),
-    signature: z.string().regex(/^0x[0-9a-fA-F]*$/).optional(),
-  })
-  .strict();
 
 export function encodeChannelState(state: ChannelState): {
   channelId: Bytes32;
@@ -148,5 +138,23 @@ export function encodeChannelCapability(capability: ChannelCapability): {
     baselineBalance: capability.baselineBalance.toString(),
     maxNetSpend: capability.maxNetSpend.toString(),
     capabilityNonce: capability.capabilityNonce.toString(),
+  };
+}
+
+export function encodeStateAuthorization(authorization: StateAuthorization):
+  | { kind: "direct"; stateSignature: `0x${string}` }
+  | {
+      kind: "capability";
+      stateSignature: `0x${string}`;
+      capability: ReturnType<typeof encodeChannelCapability>;
+      capabilitySignature: `0x${string}`;
+    } {
+  if (authorization.kind === "direct") {
+    return authorization;
+  }
+
+  return {
+    ...authorization,
+    capability: encodeChannelCapability(authorization.capability),
   };
 }

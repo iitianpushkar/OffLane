@@ -5,10 +5,14 @@ import {
   channelStateWireSchema,
   encodeChannelCapability,
   encodeChannelState,
+  createRpcMessage,
+  decodeRpcMessage,
+  encodeRpcMessage,
   hashChannelCapability,
   hashPaymentMetadata,
   ProtocolValidationError,
   resolveProposalCollision,
+  RpcMessageType,
   stateAuthorizationWireSchema,
   validateCapabilityForState,
   validatePaymentTransition,
@@ -175,6 +179,37 @@ describe("wire encoding", () => {
     expect(() => channelCapabilityWireSchema.parse(encoded)).toThrowError(
       /cannot exceed baselineBalance/,
     );
+  });
+
+  it("round-trips the compact versioned RPC frame", () => {
+    const message = createRpcMessage(
+      RpcMessageType.Request,
+      42,
+      "channels.v1.get_state",
+      { channelId: CHANNEL },
+      1_700_000_000_000,
+    );
+
+    const encoded = encodeRpcMessage(message);
+    expect(JSON.parse(encoded)).toEqual([
+      1,
+      42,
+      "channels.v1.get_state",
+      { channelId: CHANNEL },
+      1_700_000_000_000,
+    ]);
+    expect(decodeRpcMessage(encoded)).toEqual(message);
+  });
+
+  it("rejects unknown RPC methods and unsafe request IDs", () => {
+    expect(() =>
+      decodeRpcMessage('[1,1,"channels.v2.unknown",{},1700000000000]'),
+    ).toThrow();
+    expect(() =>
+      decodeRpcMessage(
+        `[1,${Number.MAX_SAFE_INTEGER + 1},"node.v1.ping",{},1700000000000]`,
+      ),
+    ).toThrow();
   });
 });
 
