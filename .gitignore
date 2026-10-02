@@ -6,3 +6,9 @@ contracts/DESIGN.md
 contracts/cache/
 contracts/out/
 contracts/broadcast/*/31337/
+
+# Node / TypeScript workspace
+node_modules/
+dist/
+coverage/
+.turbo/
