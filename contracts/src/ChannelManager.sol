@@ -140,6 +140,13 @@ contract ChannelManager is EIP712, ReentrancyGuard {
 
     mapping(bytes32 channelId => Channel) private _channels;
 
+    /// @dev Permanent replay protection for signed channel intents. `_channels`
+    /// is deleted when a channel settles or is cancelled, so checking its
+    /// status alone would allow the same still-valid intent and signature to
+    /// reopen the same channel and pull a fresh deposit from an outstanding
+    /// token allowance.
+    mapping(bytes32 channelId => bool) private _usedChannelIds;
+
     /// @dev Tracks payouts that a TIP-403 receive policy redirected to
     /// ReceivePolicyGuard instead of delivering, so they're never silently
     /// lost. Cleared once `rescueBlockedPayout` successfully claims them.
@@ -230,13 +237,14 @@ contract ChannelManager is EIP712, ReentrancyGuard {
         if (block.timestamp >= intent.validUntil) revert IntentExpired();
 
         channelId = _computeChannelId(intent);
-        if (_channels[channelId].status != Status.VOID) revert ChannelAlreadyExists();
+        if (_usedChannelIds[channelId]) revert ChannelAlreadyExists();
 
         if (!_isValidSignature(_hashIntent(intent), signatureA, intent.participantA)) {
             revert InvalidSignature();
         }
 
         Channel storage ch = _channels[channelId];
+        _usedChannelIds[channelId] = true;
         ch.participantA = intent.participantA;
         ch.participantB = intent.participantB;
         ch.token = intent.token;
@@ -404,6 +412,13 @@ contract ChannelManager is EIP712, ReentrancyGuard {
 
     function computeChannelId(ChannelIntent calldata intent) external view returns (bytes32) {
         return _computeChannelId(intent);
+    }
+
+    /// @notice Whether this channel id has ever been opened. This remains true
+    /// after settlement or cancellation so relays can distinguish an unused id
+    /// from a completed channel whose live storage has been deleted.
+    function isChannelIdUsed(bytes32 channelId) external view returns (bool) {
+        return _usedChannelIds[channelId];
     }
 
     /// @notice Amount still owed to `participant` from `channelId` that was

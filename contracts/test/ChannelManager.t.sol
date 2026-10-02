@@ -260,6 +260,30 @@ contract ChannelManagerTest is Test {
         assertEq(token.balanceOf(bob), bobBefore + 50e6, "newer state must win");
     }
 
+    function test_BidirectionalPayments_NewerReversePaymentStateWins() public {
+        (bytes32 channelId,) = _openAndJoin(100e6, 100e6, 9);
+
+        // State 1: Alice pays Bob 30. The cumulative channel split becomes
+        // A=70, B=130.
+        ChannelManager.ChannelState memory alicePaysBob = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 1, balanceA: 70e6, balanceB: 130e6, appDataHash: keccak256("A_TO_B")
+        });
+        manager.initiateClose(alicePaysBob, _signState(alicePaysBob, alicePk), _signState(alicePaysBob, bobPk));
+
+        // State 2: Bob later pays Alice 50 over the same channel. Payments are
+        // cumulative, so the newer split becomes A=120, B=80. This proves the
+        // channel has no permanent payer/payee direction.
+        ChannelManager.ChannelState memory bobPaysAlice = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 2, balanceA: 120e6, balanceB: 80e6, appDataHash: keccak256("B_TO_A")
+        });
+        manager.challenge(bobPaysAlice, _signState(bobPaysAlice, alicePk), _signState(bobPaysAlice, bobPk));
+
+        ChannelManager.Channel memory channel = manager.getChannel(channelId);
+        assertEq(channel.nonce, 2, "newest bidirectional state recorded");
+        assertEq(channel.balanceA, 120e6, "alice received reverse payment");
+        assertEq(channel.balanceB, 80e6, "bob funded reverse payment");
+    }
+
     // ------------------------------------------------------------------
     // Failure modes
     // ------------------------------------------------------------------
@@ -478,6 +502,27 @@ contract ChannelManagerTest is Test {
         bytes memory sigA = _signIntent(intent, alicePk);
         manager.openChannel(intent, sigA);
 
+        vm.expectRevert(ChannelManager.ChannelAlreadyExists.selector);
+        manager.openChannel(intent, sigA);
+    }
+
+    function test_RevertWhen_ReopeningSettledIntent() public {
+        ChannelManager.ChannelIntent memory intent = _defaultIntent(100e6, 100e6, 10);
+        bytes memory sigA = _signIntent(intent, alicePk);
+        bytes32 channelId = manager.openChannel(intent, sigA);
+        manager.joinChannel(intent, _signIntent(intent, bobPk));
+
+        ChannelManager.ChannelState memory finalState = ChannelManager.ChannelState({
+            channelId: channelId, nonce: 1, balanceA: 100e6, balanceB: 100e6, appDataHash: bytes32(0)
+        });
+        manager.cooperativeClose(finalState, _signState(finalState, alicePk), _signState(finalState, bobPk));
+
+        assertEq(uint8(manager.getChannel(channelId).status), uint8(ChannelManager.Status.VOID));
+        assertTrue(manager.isChannelIdUsed(channelId), "settled id remains marked as used");
+
+        // Alice still has an unlimited token allowance from setUp. Without the
+        // permanent used-id marker, any holder of the old signature could pull
+        // another 100 tokens by replaying this exact open intent.
         vm.expectRevert(ChannelManager.ChannelAlreadyExists.selector);
         manager.openChannel(intent, sigA);
     }

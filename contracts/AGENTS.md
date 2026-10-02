@@ -153,6 +153,10 @@ function openChannel(ChannelIntent calldata intent, bytes calldata signatureA)
 - Anyone can be `msg.sender` (relay-submittable) — the contract checks the
   signature, not the caller.
 - Channel status becomes `PENDING`.
+- A channel ID is permanently marked as used on its first successful open.
+  Settling or cancelling deletes the live `Channel` storage but does not clear
+  this marker, so an old signed intent cannot be replayed to pull another
+  deposit through a remaining TIP-20 allowance.
 - Emits `ChannelOpened(channelId, participantA, participantB, token, depositA, depositB, challengeDuration, validUntil)`.
 
 ### 2. Join
@@ -285,6 +289,7 @@ requires `msg.sender == participant`. Emits `BlockedPayoutRescued`.
 ```solidity
 function getChannel(bytes32 channelId) external view returns (Channel memory)
 function computeChannelId(ChannelIntent calldata intent) external view returns (bytes32)
+function isChannelIdUsed(bytes32 channelId) external view returns (bool)
 function getBlockedPayout(bytes32 channelId, address participant) external view returns (uint128)
 ```
 
@@ -293,6 +298,10 @@ function getBlockedPayout(bytes32 channelId, address participant) external view 
 `challengeExpireAt` — everything the relay needs to reconcile its own view
 against on-chain truth without replaying every event from genesis. (It no
 longer carries any delegated-signer fields — see below.)
+
+After settlement or cancellation, `getChannel(channelId).status` returns
+`VOID` because the live channel is deleted. Use `isChannelIdUsed(channelId)`
+to distinguish a completed/cancelled channel from an ID that has never opened.
 
 ## Delegated signing keys — Tempo Account Keychain
 
