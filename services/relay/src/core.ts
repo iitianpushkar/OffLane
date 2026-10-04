@@ -192,7 +192,7 @@ export class RelayCore {
   ): Promise<RpcPayload> {
     const proposal = parseStateProposalPayload(payload);
     return this.withChannelLock(proposal.state.channelId, async () => {
-      const channel = await this.requireChannel(proposal.state.channelId);
+      const channel = await this.requireOpenChannel(proposal.state.channelId);
       const recipient = counterparty(channel, proposal.proposer);
       participantForSession(session, proposal.proposer, proposal.authorization, this.verifier);
       const currentHash = hashChannelState(this.domain, channel.current);
@@ -261,7 +261,7 @@ export class RelayCore {
     }
     const { capability, capabilitySignature } =
       capabilityRegistrationWireSchema.parse(payload);
-    const channel = await this.requireChannel(capability.channelId);
+    const channel = await this.requireOpenChannel(capability.channelId);
     if (!sameAddress(session.signer, capability.delegatedSigner)) {
       throw new RelayError(
         "SIGNER_MISMATCH",
@@ -294,7 +294,7 @@ export class RelayCore {
   ): Promise<RpcPayload> {
     const acceptance = parseStateAcceptancePayload(payload);
     return this.withChannelLock(acceptance.state.channelId, async () => {
-      const channel = await this.requireChannel(acceptance.state.channelId);
+      const channel = await this.requireOpenChannel(acceptance.state.channelId);
       const pending = await this.store.getPending(acceptance.proposalId);
       if (!pending) throw new RelayError("PROPOSAL_NOT_FOUND", "pending proposal was not found");
       if (
@@ -398,6 +398,14 @@ export class RelayCore {
   private async requireChannel(channelId: Bytes32): Promise<RelayChannel> {
     const channel = await this.store.getChannel(channelId);
     if (!channel) throw new RelayError("CHANNEL_NOT_FOUND", "channel is not tracked by the relay");
+    return channel;
+  }
+
+  private async requireOpenChannel(channelId: Bytes32): Promise<RelayChannel> {
+    const channel = await this.requireChannel(channelId);
+    if (channel.status !== "open") {
+      throw new RelayError("CHANNEL_NOT_OPEN", "channel is not open for off-chain updates");
+    }
     return channel;
   }
 

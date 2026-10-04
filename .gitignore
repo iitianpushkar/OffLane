@@ -12,3 +12,8 @@ node_modules/
 dist/
 coverage/
 .turbo/
+
+# Relay runtime data
+offlane-relay.sqlite
+offlane-relay.sqlite-shm
+offlane-relay.sqlite-wal

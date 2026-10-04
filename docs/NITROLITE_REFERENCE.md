@@ -12,7 +12,7 @@ step was Nitrolite commit `111b7e5b03f9bed3faa6558ae4b88f3965301709`.
 | [`sdk/ts/src/rpc/dialer.ts`](https://github.com/layer-3/nitrolite/blob/111b7e5b03f9bed3faa6558ae4b88f3965301709/sdk/ts/src/rpc/dialer.ts) | Transport boundary, pending-request correlation, unsolicited events, cancellation | `packages/sdk/src/transport.ts`, `packages/sdk/src/client.ts` |
 | [`sdk/ts/src/rpc/methods.ts`](https://github.com/layer-3/nitrolite/blob/111b7e5b03f9bed3faa6558ae4b88f3965301709/sdk/ts/src/rpc/methods.ts) | Versioned method names grouped by domain | `node.v1.*`, `channels.v1.*` |
 | [`sdk/ts/src/signers.ts`](https://github.com/layer-3/nitrolite/blob/111b7e5b03f9bed3faa6558ae4b88f3965301709/sdk/ts/src/signers.ts) | Signing authority is an SDK boundary rather than relay-owned key material | Existing `StateAuthorization`; signer adapters are the next SDK slice |
-| [`nitronode`](https://github.com/layer-3/nitrolite/tree/111b7e5b03f9bed3faa6558ae4b88f3965301709/nitronode) | Relay router, storage boundary, connection hub, and chain-event observer | `services/relay`; durable storage and the chain observer are the next adapters |
+| [`nitronode`](https://github.com/layer-3/nitrolite/tree/111b7e5b03f9bed3faa6558ae4b88f3965301709/nitronode) | Relay router, storage boundary, connection hub, confirmed event replay, and persistent cursor | `services/relay` with SQLite and a Tempo `ChannelManager` indexer |
 
 ## What differs intentionally
 
@@ -47,6 +47,6 @@ The initial method surface is:
 
 The relay imports these schemas directly. Its drift test compares the complete
 request-method registry with the router, preventing the relay and SDK from
-silently disagreeing about method names. The current in-memory store isolates
-the persistence boundary; SQLite and `ChannelManager` event ingestion can be
-added without changing RPC routing or state validation.
+silently disagreeing about method names. The runtime uses SQLite behind the
+same store boundary and replays confirmed `ChannelManager` events from a
+durable cursor without changing RPC routing or state validation.

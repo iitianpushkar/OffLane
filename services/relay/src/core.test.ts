@@ -182,6 +182,7 @@ describe("RelayCore", () => {
       participantA: alice.address,
       participantB: bob.address,
       token: TOKEN,
+      status: "open",
       current: initial,
     });
     const core = new RelayCore(
@@ -310,6 +311,7 @@ describe("RelayCore", () => {
       participantA: alice.address,
       participantB: bob.address,
       token: TOKEN,
+      status: "open",
       current: initial,
     });
     const core = new RelayCore(
