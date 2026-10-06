@@ -229,6 +229,19 @@ describe("RelayCore", () => {
       request("channels.v1.get_state", { channelId: CHANNEL }),
     );
     expect(agentView.state).toEqual(encodeChannelState(initial));
+    const channelList = await core.handle(
+      aliceSession,
+      request("channels.v1.list", {}),
+    );
+    expect(channelList.channels).toEqual([
+      {
+        participantA: alice.address,
+        participantB: bob.address,
+        token: TOKEN,
+        status: "open",
+        current: encodeChannelState(initial),
+      },
+    ]);
     const aToB: ChannelState = {
       ...initial,
       nonce: 1n,

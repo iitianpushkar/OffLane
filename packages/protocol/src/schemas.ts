@@ -60,6 +60,20 @@ export const channelStateWireSchema = z
   })
   .strict();
 
+export const channelSummaryWireSchema = z
+  .object({
+    participantA: addressSchema,
+    participantB: addressSchema,
+    token: addressSchema,
+    status: z.enum(["pending", "open", "closing"]),
+    current: channelStateWireSchema,
+  })
+  .strict();
+
+export const channelListResponseWireSchema = z
+  .object({ channels: z.array(channelSummaryWireSchema).max(1_000) })
+  .strict();
+
 export const channelCapabilityWireSchema = z
   .object({
     protocolVersion: z.literal(1),
@@ -104,6 +118,7 @@ export const protocolRequestMethods = [
   "channels.v1.accept_state",
   "channels.v1.reject_state",
   "channels.v1.get_state",
+  "channels.v1.list",
   "messages.v1.send",
   "messages.v1.list",
   "messages.v1.acknowledge",

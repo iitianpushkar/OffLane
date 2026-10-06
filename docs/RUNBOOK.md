@@ -168,3 +168,30 @@ The verified encrypted run used channel
 `0xb43d0015b9d0e7f073321418cc2bde57f343fb4cac56a38346ddf315dec18351`
 and settled its recovered 9/11 PathUSD state in transaction
 [`0x10a1b4a6…a129cbe`](https://explore.tempo.xyz/tx/0x10a1b4a61db6c8ee51a4be26601df971a9a40212f215bca7e3934a69aa129cbe).
+
+## Run the web product
+
+The web server hosts the public homepage, authenticated application, and the
+optional visual demo. It also starts the persistent relay if port `7824` is
+not already serving one. From the repository root:
+
+```bash
+pnpm build
+pnpm dashboard
+```
+
+Open `http://127.0.0.1:4173` for the homepage or `/app` for the product. Connect
+a Tempo-compatible browser wallet to authenticate, list channels, create or
+join a channel, and authorize a scoped agent key. The product is fixed to
+Moderato chain ID `42431`, and the wallet must approve every signature and
+transaction.
+
+Open `/demo` for the technical execution proof. It renders the 10/10 opening
+balance, encrypted request and response, bidirectional payments, nonce
+progression, relay restart recovery, and final 9/11 settlement. Stop the web
+server and its owned relay with `Ctrl-C`.
+
+The first verified dashboard run used channel
+`0x585df5949f38290a704b5728d8adf0145272804211a51ea4777ad25890fbc356`
+and settled in transaction
+[`0x55b7588d…2953ee`](https://explore.tempo.xyz/tx/0x55b7588d2952bfdaf530c0772538790bd9efcfb18e820eee2b98749e242953ee).

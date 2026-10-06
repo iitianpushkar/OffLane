@@ -472,6 +472,8 @@ async function main(): Promise<void> {
   console.log(`ChannelManager: ${settings.manager}`);
   console.log(`Channel: ${channelId}`);
   console.log(`Alice agent: ${aliceAgent.address}`);
+  console.log(`Alice messaging key: ${aliceMessaging.publicKey}`);
+  console.log(`Bob messaging key: ${bobMessaging.publicKey}`);
 
   for (const [label, account, key] of [
     ["Alice", alice, settings.aliceKey],
@@ -561,6 +563,7 @@ async function main(): Promise<void> {
       }),
     });
     await agentClient.sendMessage(encryptedRequest);
+    console.log(`Encrypted request commitment: ${encryptedRequest.messageId}`);
     const bobInbox = await bobClient.listMessages(channelId);
     const receivedRequest = bobInbox.find(
       (record) => record.envelope.messageId === encryptedRequest.messageId,
@@ -615,6 +618,7 @@ async function main(): Promise<void> {
       }),
     });
     await bobClient.sendMessage(encryptedResponse);
+    console.log(`Encrypted response commitment: ${encryptedResponse.messageId}`);
     const aliceInbox = await agentClient.listMessages(channelId);
     const receivedResponse = aliceInbox.find(
       (record) => record.envelope.messageId === encryptedResponse.messageId,

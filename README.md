@@ -91,6 +91,7 @@ packages/protocol/  Canonical types, schemas, hashing, and state validation
 packages/sdk/       Transport-independent client and WebSocket adapter
 services/relay/     Authenticated relay, SQLite store, and chain indexer
 apps/agent-demo/    Executable Alice, Bob, and delegated-agent demo
+apps/dashboard/     Homepage, wallet product, and optional visual proof
 docs/               Nitrolite mapping and operational runbook
 ```
 
@@ -188,6 +189,28 @@ state on-chain. It aborts unless the RPC reports Moderato chain ID `42431`. If
 a relay step fails after join, it cooperatively settles the newest mutually
 signed state before returning the error so test collateral is not left locked.
 
+## Run the web product
+
+The web package contains a public homepage and a wallet-authenticated product
+workspace. From the app, a user can authenticate with the relay, list indexed
+channels, open a channel, exchange an invitation with a counterparty, join a
+pending channel, and generate and authorize a channel-scoped agent key with a
+hard spending limit. The server starts the persistent relay automatically.
+
+The earlier execution dashboard remains available under `/demo` as an
+optional technical proof. Test keys used by that proof remain in the local
+Node process and are never returned to browser code.
+
+With the disposable test keys and Moderato configuration in `.env`:
+
+```bash
+pnpm build
+pnpm dashboard
+```
+
+Open `http://127.0.0.1:4173`. The product only configures Tempo Moderato chain
+ID `42431`; every signature and transaction still requires wallet approval.
+
 ## Security boundaries
 
 - The relay never holds participant root keys and never countersigns balances.
@@ -241,3 +264,4 @@ signed state before returning the error so test collateral is not left locked.
 - [SDK package](packages/sdk/README.md)
 - [Relay service](services/relay/README.md)
 - [Bidirectional agent demo](apps/agent-demo/README.md)
+- [Visual dashboard](apps/dashboard/README.md)

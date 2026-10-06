@@ -2,6 +2,7 @@ import {
   authChallengeResponseWireSchema,
   authVerifyResponseWireSchema,
   capabilityRegistrationWireSchema,
+  channelListResponseWireSchema,
   createRpcMessage,
   decodeRpcMessage,
   encodeChannelCapability,
@@ -18,6 +19,7 @@ import {
   type Address,
   type Bytes32,
   type ChannelCapability,
+  type ChannelSummary,
   type EncryptedEnvelope,
   type EncryptedMessageRecord,
   type Hex,
@@ -255,6 +257,12 @@ export class OfflaneClient {
     options?: RpcCallOptions,
   ): Promise<RpcPayload> {
     return this.call("channels.v1.get_state", { channelId }, options);
+  }
+
+  async listChannels(options?: RpcCallOptions): Promise<ChannelSummary[]> {
+    return channelListResponseWireSchema.parse(
+      await this.call("channels.v1.list", {}, options),
+    ).channels;
   }
 
   async sendMessage(

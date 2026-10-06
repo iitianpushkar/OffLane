@@ -65,6 +65,16 @@ export interface ChannelContext {
   current: ChannelState;
 }
 
+export type ChannelLifecycleStatus = "pending" | "open" | "closing";
+
+export interface ChannelSummary {
+  participantA: Address;
+  participantB: Address;
+  token: Address;
+  status: ChannelLifecycleStatus;
+  current: ChannelState;
+}
+
 export interface ChannelTerms {
   participantA: Address;
   participantB: Address;

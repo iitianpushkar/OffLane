@@ -33,6 +33,7 @@ export interface PendingProposal {
 
 export interface RelayStore {
   getChannel(channelId: Bytes32): Promise<RelayChannel | undefined>;
+  listChannels(participants: Address[]): Promise<RelayChannel[]>;
   saveChannel(channel: RelayChannel): Promise<void>;
   deleteChannel(channelId: Bytes32): Promise<void>;
   getPendingByChannel(channelId: Bytes32): Promise<PendingProposal | undefined>;
@@ -82,6 +83,19 @@ export class MemoryRelayStore implements RelayStore {
 
   async getChannel(channelId: Bytes32): Promise<RelayChannel | undefined> {
     return this.channels.get(channelKey(channelId));
+  }
+
+  async listChannels(participants: Address[]): Promise<RelayChannel[]> {
+    const allowed = new Set(participants.map((participant) => participant.toLowerCase()));
+    return [...this.channels.values()]
+      .filter(
+        (channel) =>
+          allowed.has(channel.participantA.toLowerCase()) ||
+          allowed.has(channel.participantB.toLowerCase()),
+      )
+      .sort((left, right) =>
+        left.current.channelId.localeCompare(right.current.channelId),
+      );
   }
 
   async saveChannel(channel: RelayChannel): Promise<void> {

@@ -131,6 +131,8 @@ export class RelayCore {
         return this.rejectState(session, request.payload);
       case "channels.v1.get_state":
         return this.getState(session, request.payload);
+      case "channels.v1.list":
+        return this.listChannels(session);
       case "messages.v1.send":
         return this.sendMessage(session, request.payload);
       case "messages.v1.list":
@@ -393,6 +395,26 @@ export class RelayCore {
       throw new RelayError("UNAUTHORIZED", "only a channel participant may read its state");
     }
     return this.channelPayload(channel);
+  }
+
+  private async listChannels(session: RelaySession): Promise<RpcPayload> {
+    if (!session.signer) {
+      throw new RelayError("UNAUTHENTICATED", "authenticate before listing channels");
+    }
+    const participants = [
+      session.signer,
+      ...[...session.participants].map((participant) => participant as Address),
+    ];
+    const channels = await this.store.listChannels(participants);
+    return {
+      channels: channels.map((channel) => ({
+        participantA: channel.participantA,
+        participantB: channel.participantB,
+        token: channel.token,
+        status: channel.status,
+        current: encodeChannelState(channel.current),
+      })),
+    };
   }
 
   private async sendMessage(

@@ -157,6 +157,22 @@ export class SqliteRelayStore implements RelayStore {
     return row ? decodeChannel(row) : undefined;
   }
 
+  async listChannels(participants: Address[]): Promise<RelayChannel[]> {
+    if (participants.length === 0) return [];
+    const normalized = [...new Set(participants.map((value) => value.toLowerCase()))];
+    const placeholders = normalized.map(() => "?").join(", ");
+    const rows = this.database
+      .prepare(`
+        SELECT participant_a, participant_b, token, status, current_state,
+               authorization_a, authorization_b
+        FROM channels
+        WHERE participant_a IN (${placeholders}) OR participant_b IN (${placeholders})
+        ORDER BY channel_id
+      `)
+      .all(...normalized, ...normalized) as unknown as ChannelRow[];
+    return rows.map(decodeChannel);
+  }
+
   async saveChannel(channel: RelayChannel): Promise<void> {
     const encoded = encodeChannel(channel);
     this.database

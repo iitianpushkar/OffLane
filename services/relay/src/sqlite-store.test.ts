@@ -98,6 +98,10 @@ describe("SqliteRelayStore", () => {
         createdAt: 123,
       });
       expect(await store.getIndexerCursor(42431, A)).toBe(99n);
+      expect(await store.listChannels([A])).toMatchObject([
+        { participantA: A, participantB: B, status: "open" },
+      ]);
+      expect(await store.listChannels([TOKEN])).toEqual([]);
       expect(await store.listMessages(CHANNEL, B)).toEqual([
         { envelope, status: "sent", sentAt: 124 },
         { envelope: highSequenceEnvelope, status: "sent", sentAt: 123 },

@@ -1,0 +1,23 @@
+{
+  "name": "@offlane/dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prebuild": "pnpm --filter @offlane/sdk build",
+    "build": "tsc -p tsconfig.json && vite build",
+    "pretypecheck": "pnpm --filter @offlane/sdk build",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "start": "node --env-file=../../.env dist/server.js"
+  },
+  "dependencies": {
+    "@offlane/protocol": "workspace:*",
+    "@offlane/sdk": "workspace:*",
+    "viem": "^2.38.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.7"
+  }
+}
