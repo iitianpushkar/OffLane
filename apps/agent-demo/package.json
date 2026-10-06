@@ -1,0 +1,22 @@
+{
+  "name": "@offlane/agent-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node --env-file=../../.env dist/main.js"
+  },
+  "dependencies": {
+    "@offlane/protocol": "workspace:*",
+    "@offlane/sdk": "workspace:*",
+    "viem": "^2.38.5",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3"
+  }
+}

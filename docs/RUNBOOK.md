@@ -25,9 +25,9 @@ cd ..
 
 ## Deploy `ChannelManager`
 
-The deployment listed as previous in `contracts/README.md` predates agent
-capabilities. Deploy the current source and record both the contract address
-and deployment block.
+The repository records a current capability-enabled Moderato deployment in
+`contracts/README.md`. Follow this section only when deploying a new instance,
+and record both its contract address and deployment block.
 
 ```bash
 cp .env.example .env
@@ -51,7 +51,17 @@ test "$(cast chain-id --rpc-url "$TEMPO_TESTNET_RPC_URL")" = "42431" || {
 forge create src/ChannelManager.sol:ChannelManager \
   --rpc-url "$TEMPO_TESTNET_RPC_URL" \
   --interactive \
+  --tempo.fee-token PathUSD \
   --broadcast
+```
+
+Moderato pays transaction fees in TIP-20 stablecoins. If a disposable test
+deployer has no PathUSD, fund its public address with the official testnet
+faucet RPC before deployment:
+
+```bash
+cast rpc tempo_fundAddress DEPLOYER_ADDRESS \
+  --rpc-url "$TEMPO_TESTNET_RPC_URL"
 ```
 
 Use the transaction hash printed by `forge create` to retrieve the deployment
@@ -116,6 +126,7 @@ export PATHUSD='MODERATO_PATHUSD_ADDRESS'
 
 forge script script/SmokeTest.s.sol:SmokeTest \
   --rpc-url "$TEMPO_TESTNET_RPC_URL" \
+  --tempo.fee-token PathUSD \
   --broadcast \
   -vvvv
 ```
@@ -126,3 +137,27 @@ and use a hardware wallet or an interactive signing flow.
 The smoke script closes the channel, so the indexer will remove it after the
 configured confirmation depth. Use a separate open channel for relay SDK
 experiments.
+
+## Run the bidirectional AI-agent demo
+
+The agent demo is the full relay path. It starts an isolated relay, opens and
+joins a 10/10 PathUSD channel, gives an ephemeral Alice agent a root-signed
+3 PathUSD spending capability, accepts payments in both directions, restarts
+the relay to prove SQLite recovery, and closes with the agent capability as
+Alice's settlement evidence.
+
+The ignored root `.env` must contain the Moderato RPC configuration and funded,
+disposable `ALICE_PK` and `BOB_PK` test keys. Then run:
+
+```bash
+pnpm build
+pnpm --filter @offlane/agent-demo start
+```
+
+The command refuses any live chain ID other than Moderato `42431`. It creates a
+temporary SQLite database and removes it after the final on-chain settlement.
+
+The first verified run used channel
+`0xe5ba669256b66e9245996f790f78964588cb66121ae13ef64c3b2f8bc5aeffa0`
+and settled it in transaction
+[`0xf78f1fd3…68ca5a3`](https://explore.tempo.xyz/tx/0xf78f1fd3279542ac73a9aeb548c4103f6eae0abcc9d398b1cb0a3ee2f68ca5a3).

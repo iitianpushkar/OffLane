@@ -73,6 +73,8 @@ authority.
 - SQLite persistence for channels, proposals, authorizations, and indexer cursor
 - Confirmed `ChannelManager` event replay from the deployment block
 - Lifecycle gating for pending, open, closing, cancelled, and settled channels
+- Runnable Moderato agent demo with bidirectional payments, relay restart
+  recovery, and capability-aware on-chain settlement
 
 Encrypted message payload transport is not implemented yet. `ChannelState`
 already exposes `appDataHash` so future ciphertexts, service requests, and
@@ -85,6 +87,7 @@ contracts/          Foundry project and ChannelManager
 packages/protocol/  Canonical types, schemas, hashing, and state validation
 packages/sdk/       Transport-independent client and WebSocket adapter
 services/relay/     Authenticated relay, SQLite store, and chain indexer
+apps/agent-demo/    Executable Alice, Bob, and delegated-agent demo
 docs/               Nitrolite mapping and operational runbook
 ```
 
@@ -116,9 +119,10 @@ WebSocket RPC connection.
 
 ## Run the relay
 
-Deploy the current `ChannelManager` first. The deployment documented in
-[contracts/README.md](contracts/README.md) predates channel capabilities and
-must not be used with the current SDK and relay.
+The current capability-enabled `ChannelManager` is deployed on Tempo Moderato
+at [`0xCa234b7cF576A4dd65bF28C6405d91eEA1f57789`](https://explore.tempo.xyz/address/0xCa234b7cF576A4dd65bF28C6405d91eEA1f57789),
+starting at block `38381392`. Deployment details are recorded in
+[contracts/README.md](contracts/README.md).
 
 From the repository root:
 
@@ -126,11 +130,10 @@ From the repository root:
 cp .env.example .env
 ```
 
-Edit `.env` and set at least these deployment-specific values:
+The template contains the current contract address and deployment block. Set
+the RPC URL:
 
 ```dotenv
-OFFLANE_CHANNEL_MANAGER=DEPLOYED_CHANNEL_MANAGER_ADDRESS
-OFFLANE_DEPLOYMENT_BLOCK=DEPLOYMENT_BLOCK_NUMBER
 OFFLANE_RPC_URL=YOUR_MODERATO_RPC_URL
 ```
 
@@ -161,6 +164,21 @@ Channels, pending proposals, mutually signed states, and the indexer cursor
 survive restarts in SQLite. The complete deployment, startup, and live smoke
 test instructions are in [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
+## Run the bidirectional agent demo
+
+With disposable funded `ALICE_PK` and `BOB_PK` values in `.env`:
+
+```bash
+pnpm build
+pnpm --filter @offlane/agent-demo start
+```
+
+The demo manages an isolated relay and temporary SQLite database. It opens a
+10/10 PathUSD channel, authorizes an ephemeral Alice agent with a 3 PathUSD
+spending cap, executes A→B and B→A payments, restarts the relay, verifies nonce
+2 recovery, and settles the final 9/11 PathUSD state on-chain. It aborts unless
+the RPC reports Moderato chain ID `42431`.
+
 ## Security boundaries
 
 - The relay never holds participant root keys and never countersigns balances.
@@ -183,17 +201,15 @@ test instructions are in [docs/RUNBOOK.md](docs/RUNBOOK.md).
   on current Node releases.
 - Encrypted messaging, message retention, and delivery acknowledgements are not
   implemented.
-- There is no packaged CLI or example agent application yet.
 - The current repository does not contain a production deployment of the
   capability-enabled contract.
 
 ## Next milestones
 
-1. Add runnable Alice, Bob, and delegated-agent CLI examples.
-2. Add encrypted message envelopes bound to `ChannelState.appDataHash`.
-3. Add delivery receipts and paid service request semantics.
-4. Add Tempo TIP-1020 verification for P256 and WebAuthn relay sessions.
-5. Add block-hash reorg reconciliation, metrics, rate limits, and deployment
+1. Add encrypted message envelopes bound to `ChannelState.appDataHash`.
+2. Add delivery receipts and paid service request semantics.
+3. Add Tempo TIP-1020 verification for P256 and WebAuthn relay sessions.
+4. Add block-hash reorg reconciliation, metrics, rate limits, and deployment
    packaging.
 
 ## Documentation
@@ -205,3 +221,4 @@ test instructions are in [docs/RUNBOOK.md](docs/RUNBOOK.md).
 - [Protocol package](packages/protocol/README.md)
 - [SDK package](packages/sdk/README.md)
 - [Relay service](services/relay/README.md)
+- [Bidirectional agent demo](apps/agent-demo/README.md)

@@ -6,7 +6,14 @@ Foundry project for `ChannelManager`, the Tempo state-channel contract. See `DES
 
 | Network | Address | Status |
 |---|---|---|
-| Moderato testnet (chain id `42431`) | [`0xE044C8DeCdc74503B2E0B12a63C7F1Da85717567`](https://explore.testnet.tempo.xyz/address/0xE044C8DeCdc74503B2E0B12a63C7F1Da85717567) | Previous deployment — predates channel-scoped capabilities |
+| Moderato testnet (chain id `42431`) | [`0xCa234b7cF576A4dd65bF28C6405d91eEA1f57789`](https://explore.tempo.xyz/address/0xCa234b7cF576A4dd65bF28C6405d91eEA1f57789) | Current capability-enabled deployment, block `38381392` |
+| Moderato testnet (chain id `42431`) | [`0xE044C8DeCdc74503B2E0B12a63C7F1Da85717567`](https://explore.tempo.xyz/address/0xE044C8DeCdc74503B2E0B12a63C7F1Da85717567) | Previous deployment — predates channel-scoped capabilities |
+
+Current deployment transaction:
+[`0x9263e1e2…f71b7cd5`](https://explore.tempo.xyz/tx/0x9263e1e25c42e1d97211b7fc0acae34edfc9f46761d0353a8ac82676f71b7cd5).
+The receipt succeeded with Tempo transaction type `0x76`, paying fees in
+PathUSD. The deployed bytecode and `PROTOCOL_VERSION() == 1` were verified over
+the Moderato RPC.
 
 Verified end-to-end via `script/SmokeTest.s.sol` (open → join → cooperativeClose against real testnet pathUSD). See `DESIGN.md`'s "Verified" section for details.
 
@@ -60,7 +67,7 @@ $ anvil
 ### Deploy
 
 ```shell
-$ forge create src/ChannelManager.sol:ChannelManager --rpc-url moderato --interactive --broadcast --verify
+$ forge create src/ChannelManager.sol:ChannelManager --rpc-url moderato --interactive --tempo.fee-token PathUSD --broadcast
 ```
 
 ### Cast
