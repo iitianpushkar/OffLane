@@ -12,6 +12,8 @@ import {ITIP20} from "../src/interfaces/ITIP20.sol";
 /// TIP-1020 precompile and real TIP-20 token behavior, not Foundry's local
 /// emulation. Reads ALICE_PK, BOB_PK, CHANNEL_MANAGER, PATHUSD from env.
 contract SmokeTest is Script {
+    uint256 internal constant MODERATO_CHAIN_ID = 42_431;
+
     bytes32 internal constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 internal constant CHANNEL_INTENT_TYPEHASH = keccak256(
@@ -21,6 +23,8 @@ contract SmokeTest is Script {
         keccak256("ChannelState(bytes32 channelId,uint64 nonce,uint128 balanceA,uint128 balanceB,bytes32 appDataHash)");
 
     function run() external {
+        require(block.chainid == MODERATO_CHAIN_ID, "SmokeTest: Moderato only");
+
         uint256 alicePk = vm.envUint("ALICE_PK");
         uint256 bobPk = vm.envUint("BOB_PK");
         address managerAddr = vm.envAddress("CHANNEL_MANAGER");

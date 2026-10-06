@@ -19,20 +19,29 @@ progression.
 
 ## Run
 
-```bash
-OFFLANE_CHAIN_ID=42431 \
-OFFLANE_CHANNEL_MANAGER=0x... \
-OFFLANE_RPC_URL=https://... \
-OFFLANE_DEPLOYMENT_BLOCK=123456 \
-pnpm --filter @offlane/relay build
+Create the environment file at the workspace root:
 
-OFFLANE_CHAIN_ID=42431 \
-OFFLANE_CHANNEL_MANAGER=0x... \
-OFFLANE_RPC_URL=https://... \
-OFFLANE_DEPLOYMENT_BLOCK=123456 \
-OFFLANE_DATABASE_PATH=./offlane-relay.sqlite \
+```bash
+cp .env.example .env
+```
+
+Set the deployment-specific values in `.env`:
+
+```dotenv
+OFFLANE_CHANNEL_MANAGER=0x...
+OFFLANE_RPC_URL=https://...
+OFFLANE_DEPLOYMENT_BLOCK=123456
+```
+
+Build and run the compiled service from the workspace root:
+
+```bash
+pnpm --filter @offlane/relay build
 pnpm --filter @offlane/relay start
 ```
+
+The start script requires and loads the root `.env` automatically. Existing
+process environment variables take precedence over values from the file.
 
 The WebSocket endpoint is `ws://127.0.0.1:7824/ws` and the health endpoint is
 `http://127.0.0.1:7824/health`.

@@ -13,6 +13,11 @@ dist/
 coverage/
 .turbo/
 
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
 # Relay runtime data
 offlane-relay.sqlite
 offlane-relay.sqlite-shm

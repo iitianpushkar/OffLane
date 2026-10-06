@@ -123,19 +123,30 @@ must not be used with the current SDK and relay.
 From the repository root:
 
 ```bash
-export OFFLANE_CHAIN_ID=42431
-export OFFLANE_CHANNEL_MANAGER='DEPLOYED_CHANNEL_MANAGER_ADDRESS'
-export OFFLANE_DEPLOYMENT_BLOCK='DEPLOYMENT_BLOCK_NUMBER'
-export OFFLANE_RPC_URL='YOUR_MODERATO_RPC_URL'
-export OFFLANE_DATABASE_PATH='./offlane-relay.sqlite'
-export OFFLANE_CONFIRMATIONS=2
-export HOST=127.0.0.1
-export PORT=7824
+cp .env.example .env
+```
+
+Edit `.env` and set at least these deployment-specific values:
+
+```dotenv
+OFFLANE_CHANNEL_MANAGER=DEPLOYED_CHANNEL_MANAGER_ADDRESS
+OFFLANE_DEPLOYMENT_BLOCK=DEPLOYMENT_BLOCK_NUMBER
+OFFLANE_RPC_URL=YOUR_MODERATO_RPC_URL
+```
+
+`ALICE_PK` and `BOB_PK` are optional and must only contain disposable
+Moderato test keys. The local `.env` is ignored by Git.
+
+Then build and start the relay:
+
+```bash
+pnpm build
 
 pnpm --filter @offlane/relay start
 ```
 
-The relay replays confirmed contract events before it opens the server.
+The start script requires and reads the root `.env` automatically. The relay
+replays confirmed contract events before it opens the server.
 
 ```text
 WebSocket RPC: ws://127.0.0.1:7824/ws
