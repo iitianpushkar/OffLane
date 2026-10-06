@@ -4,7 +4,9 @@ The OffLane relay transports participant-signed channel states. It does not
 hold participant keys and never countersigns a balance update.
 
 The runnable relay stores channels, pending proposals, signed states, and its
-chain-indexer cursor in SQLite. On startup it replays confirmed
+chain-indexer cursor in SQLite. It also stores opaque encrypted envelopes and
+their delivery status; it never receives messaging private keys or plaintext.
+On startup it replays confirmed
 `ChannelManager` events from the saved cursor before accepting traffic.
 
 Delegated agents authenticate with their own key, then call
@@ -16,6 +18,21 @@ The default verifier supports secp256k1 EOAs, which covers autonomous agent
 keys. `AuthorizationVerifier` is an explicit adapter boundary for adding
 Tempo TIP-1020 P256 and WebAuthn verification without changing relay state
 progression.
+
+## Encrypted message routing
+
+Authenticated channel participants and registered delegated agents can call:
+
+- `messages.v1.send` to persist and route an encrypted envelope
+- `messages.v1.list` to recover the caller's channel inbox after reconnecting
+- `messages.v1.acknowledge` to mark a message as processed by its recipient
+
+The relay recomputes every envelope commitment and requires a message's
+`stateNonce` to be the next channel nonce. A proposal with nonzero
+`appDataHash` must refer to that stored message, proposer, and nonce. This
+prevents an encrypted request from being paired with a different payment
+state. Message rows survive relay restarts and are removed with their channel
+after confirmed settlement.
 
 ## Run
 

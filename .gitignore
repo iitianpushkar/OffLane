@@ -2,6 +2,9 @@
 Tempo Off-Chain Payment & Encrypted Messaging Network — Technical Architecture.pdf
 contracts/DESIGN.md
 
+# macOS
+.DS_Store
+
 # Foundry
 contracts/cache/
 contracts/out/

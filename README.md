@@ -16,9 +16,9 @@ See [the reference map](docs/NITROLITE_REFERENCE.md) for the exact comparison.
 
 ```mermaid
 flowchart LR
-    A[Participant or agent A] <-->|Signed state proposals| R[OffLane relay]
-    R <-->|Signed acceptances and events| B[Participant or agent B]
-    R -->|Confirmed event replay| DB[(SQLite)]
+    A[Participant or agent A] <-->|Signed states and ciphertext| R[OffLane relay]
+    R <-->|Signed states and ciphertext| B[Participant or agent B]
+    R -->|Channels, ciphertext and event cursor| DB[(SQLite)]
     CM[Tempo ChannelManager] -->|Open, join, close and settlement events| R
     A -->|Deposit or settle| CM
     B -->|Deposit or settle| CM
@@ -70,15 +70,18 @@ authority.
 - Agent capability registration for inbound event routing
 - Proposal, acceptance, rejection, collision resolution, and state queries
 - WebSocket relay with strict runtime schemas and request correlation
-- SQLite persistence for channels, proposals, authorizations, and indexer cursor
+- X25519 key agreement, HKDF-SHA256 key derivation, and authenticated
+  XChaCha20-Poly1305 message encryption in the SDK
+- Opaque encrypted-envelope routing with inbox listing, delivery state, and
+  recipient acknowledgements
+- Canonical ciphertext commitments bound to `ChannelState.appDataHash`
+- SQLite persistence for channels, proposals, authorizations, encrypted
+  messages, acknowledgements, and indexer cursor
 - Confirmed `ChannelManager` event replay from the deployment block
 - Lifecycle gating for pending, open, closing, cancelled, and settled channels
-- Runnable Moderato agent demo with bidirectional payments, relay restart
-  recovery, and capability-aware on-chain settlement
-
-Encrypted message payload transport is not implemented yet. `ChannelState`
-already exposes `appDataHash` so future ciphertexts, service requests, and
-receipts can be cryptographically bound to a payment state.
+- Runnable Moderato agent demo with bidirectional encrypted request/response
+  messaging, payments, relay restart recovery, and capability-aware on-chain
+  settlement
 
 ## Repository layout
 
@@ -113,9 +116,10 @@ forge test
 ```
 
 The tests cover direct and delegated signatures, capability limits,
-bidirectional A→B then B→A payments, deterministic proposal collisions,
-SQLite restart recovery, confirmed event replay, request freshness, and a real
-WebSocket RPC connection.
+bidirectional A→B then B→A payments, encryption and tamper rejection,
+ciphertext-to-state binding, delivery acknowledgement, full `uint64` message
+sequences, SQLite restart recovery, confirmed event replay, request freshness,
+and a real WebSocket RPC connection.
 
 ## Run the relay
 
@@ -174,14 +178,25 @@ pnpm --filter @offlane/agent-demo start
 ```
 
 The demo manages an isolated relay and temporary SQLite database. It opens a
-10/10 PathUSD channel, authorizes an ephemeral Alice agent with a 3 PathUSD
-spending cap, executes A→B and B→A payments, restarts the relay, verifies nonce
-2 recovery, and settles the final 9/11 PathUSD state on-chain. It aborts unless
-the RPC reports Moderato chain ID `42431`.
+10/10 PathUSD channel and authorizes an ephemeral Alice agent with a 3 PathUSD
+spending cap. The agent encrypts a JSON request for Bob and pays 2 PathUSD;
+Bob decrypts it, acknowledges it, encrypts a response, and pays 1 PathUSD
+back. Each encrypted envelope hash is the corresponding state's
+`appDataHash`. The demo restarts the relay, decrypts both recovered messages,
+checks their acknowledgements and nonce 2, then settles the final 9/11 PathUSD
+state on-chain. It aborts unless the RPC reports Moderato chain ID `42431`. If
+a relay step fails after join, it cooperatively settles the newest mutually
+signed state before returning the error so test collateral is not left locked.
 
 ## Security boundaries
 
 - The relay never holds participant root keys and never countersigns balances.
+- Messaging private keys and plaintext remain at the endpoints. The relay sees
+  routing headers, ciphertext, timing, sizes, and delivery state.
+- XChaCha20-Poly1305 authenticates the ciphertext and its channel, sender,
+  recipient, key, sequence, state nonce, and content-type headers.
+- A nonzero state `appDataHash` accepted by the relay must identify the stored
+  encrypted envelope for that nonce and proposer.
 - Every balance change requires valid participant or capability authorization.
 - The contract enforces nonce progression, conserved collateral, and agent
   spending limits during settlement.
@@ -199,15 +214,19 @@ the RPC reports Moderato chain ID `42431`.
   deep-reorg reconciliation is still pending.
 - SQLite uses Node's `node:sqlite` API, which may print an experimental warning
   on current Node releases.
-- Encrypted messaging, message retention, and delivery acknowledgements are not
-  implemented.
-- The current repository does not contain a production deployment of the
-  capability-enabled contract.
+- The demo exchanges messaging public keys out of band. Production key
+  certificates, discovery, rotation, and forward-secret ratcheting remain.
+- Relay acknowledgements are authenticated by the recipient's relay session;
+  they are not yet portable, independently signed delivery receipts.
+- Encrypted messages are retained while the indexed channel exists and are
+  deleted after confirmed settlement. Archival policy and large attachments
+  are outside the current scope.
+- The recorded deployment is a Moderato testnet deployment, not production.
 
 ## Next milestones
 
-1. Add encrypted message envelopes bound to `ChannelState.appDataHash`.
-2. Add delivery receipts and paid service request semantics.
+1. Add signed delivery receipts and paid service request/result semantics.
+2. Add messaging-key certificates, rotation, and forward-secret sessions.
 3. Add Tempo TIP-1020 verification for P256 and WebAuthn relay sessions.
 4. Add block-hash reorg reconciliation, metrics, rate limits, and deployment
    packaging.

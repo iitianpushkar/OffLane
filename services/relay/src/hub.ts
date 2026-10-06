@@ -31,7 +31,8 @@ export class SessionHub {
     this.sessions.delete(session.id);
   }
 
-  publish(signer: Address, message: RpcMessage): void {
+  publish(signer: Address, message: RpcMessage): number {
+    let delivered = 0;
     for (const session of this.sessions.values()) {
       if (
         session.signer?.toLowerCase() === signer.toLowerCase() ||
@@ -39,10 +40,12 @@ export class SessionHub {
       ) {
         try {
           session.send(message);
+          delivered += 1;
         } catch {
           this.sessions.delete(session.id);
         }
       }
     }
+    return delivered;
   }
 }

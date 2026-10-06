@@ -33,3 +33,18 @@ Capabilities do not expire on-chain because expiry or revocation must not
 invalidate an older signed state that is still needed as dispute evidence.
 Clients enforce operational expiry and close the channel to retire the
 capability permanently.
+
+## Encrypted messages
+
+`EncryptedEnvelope` is the canonical endpoint-encrypted payload shared by the
+SDK and relay. Its authenticated header binds the channel, sender, recipient,
+per-recipient sequence, payment-state nonce, both X25519 public keys, and
+content type. `hashEncryptedEnvelope` additionally commits to the 24-byte
+encryption nonce and ciphertext. That message ID is stored in
+`ChannelState.appDataHash`, tying the encrypted request or response to the
+balance transition signed by both channel participants.
+
+Wire schemas encode `bigint` fields as decimal strings. The versioned message
+RPC surface is `messages.v1.send`, `messages.v1.list`, and
+`messages.v1.acknowledge`, with `messages.v1.received` and
+`messages.v1.acknowledged` events.

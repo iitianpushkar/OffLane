@@ -5,11 +5,16 @@ import {
   capabilityRegistrationWireSchema,
   createRpcMessage,
   encodeChannelState,
+  encodeEncryptedMessageRecord,
   encodeStateAuthorization,
+  hashEncryptedEnvelope,
   hashChannelState,
   parseStateAcceptancePayload,
   parseStateProposalPayload,
   parseStateQueryPayload,
+  messageAcknowledgementWireSchema,
+  messageListWireSchema,
+  messageSendWireSchema,
   protocolRequestMethods,
   resolveProposalCollision,
   RpcMessageType,
@@ -126,6 +131,12 @@ export class RelayCore {
         return this.rejectState(session, request.payload);
       case "channels.v1.get_state":
         return this.getState(session, request.payload);
+      case "messages.v1.send":
+        return this.sendMessage(session, request.payload);
+      case "messages.v1.list":
+        return this.listMessages(session, request.payload);
+      case "messages.v1.acknowledge":
+        return this.acknowledgeMessage(session, request.payload);
       default:
         throw new RelayError("METHOD_NOT_FOUND", `unsupported method: ${request.method}`);
     }
@@ -200,6 +211,21 @@ export class RelayCore {
         throw new RelayError("STALE_STATE", "proposal is not based on the latest signed state");
       }
       validatePaymentTransition(channel, proposal.state);
+      if (proposal.state.appDataHash !== `0x${"00".repeat(32)}`) {
+        const message = await this.store.getMessage(proposal.state.appDataHash);
+        if (
+          !message ||
+          message.envelope.channelId.toLowerCase() !== proposal.state.channelId.toLowerCase() ||
+          message.envelope.stateNonce !== proposal.state.nonce ||
+          !sameAddress(message.envelope.sender, proposal.proposer) ||
+          !sameAddress(message.envelope.recipient, recipient)
+        ) {
+          throw new RelayError(
+            "INVALID_APP_DATA",
+            "state appDataHash is not a matching encrypted message commitment",
+          );
+        }
+      }
       if (
         !(await this.verifier.verifyStateAuthorization(
           channel,
@@ -369,6 +395,88 @@ export class RelayCore {
     return this.channelPayload(channel);
   }
 
+  private async sendMessage(
+    session: RelaySession,
+    payload: RpcPayload,
+  ): Promise<RpcPayload> {
+    const { envelope } = messageSendWireSchema.parse(payload);
+    const channel = await this.requireOpenChannel(envelope.channelId);
+    const recipient = counterparty(channel, envelope.sender);
+    if (!sameAddress(recipient, envelope.recipient)) {
+      throw new RelayError("UNKNOWN_PARTICIPANT", "message recipient is not the counterparty");
+    }
+    if (!this.hub.isAuthorized(session, envelope.sender)) {
+      throw new RelayError("SIGNER_MISMATCH", "session is not authorized for message sender");
+    }
+    if (envelope.stateNonce !== channel.current.nonce + 1n) {
+      throw new RelayError("INVALID_NONCE", "message must bind the next channel state nonce");
+    }
+    if (
+      hashEncryptedEnvelope(envelope).toLowerCase() !==
+      envelope.messageId.toLowerCase()
+    ) {
+      throw new RelayError("INVALID_MESSAGE", "encrypted message commitment is invalid");
+    }
+    const sentAt = this.now();
+    await this.store.saveMessage({ envelope, status: "sent", sentAt });
+    const delivered = this.publish(envelope.recipient, "messages.v1.received", {
+      envelope: encodeEncryptedMessageRecord({ envelope, status: "sent", sentAt }).envelope,
+    });
+    if (delivered > 0) {
+      await this.store.markMessageDelivered(envelope.messageId, this.now());
+    }
+    return {
+      messageId: envelope.messageId,
+      status: delivered > 0 ? "delivered" : "sent",
+    };
+  }
+
+  private async listMessages(
+    session: RelaySession,
+    payload: RpcPayload,
+  ): Promise<RpcPayload> {
+    const { channelId, afterSequence } = messageListWireSchema.parse(payload);
+    const channel = await this.requireChannel(channelId);
+    const recipient = this.authorizedParticipant(session, channel);
+    let messages = await this.store.listMessages(channelId, recipient, afterSequence);
+    const deliveredAt = this.now();
+    for (const message of messages) {
+      if (message.status === "sent") {
+        await this.store.markMessageDelivered(message.envelope.messageId, deliveredAt);
+      }
+    }
+    messages = await this.store.listMessages(channelId, recipient, afterSequence);
+    return { messages: messages.map(encodeEncryptedMessageRecord) };
+  }
+
+  private async acknowledgeMessage(
+    session: RelaySession,
+    payload: RpcPayload,
+  ): Promise<RpcPayload> {
+    const { channelId, messageId } = messageAcknowledgementWireSchema.parse(payload);
+    const message = await this.store.getMessage(messageId);
+    if (!message || message.envelope.channelId.toLowerCase() !== channelId.toLowerCase()) {
+      throw new RelayError("MESSAGE_NOT_FOUND", "encrypted message was not found");
+    }
+    if (!this.hub.isAuthorized(session, message.envelope.recipient)) {
+      throw new RelayError("SIGNER_MISMATCH", "only the recipient may acknowledge a message");
+    }
+    const acknowledgedAt = this.now();
+    await this.store.acknowledgeMessage(messageId, acknowledgedAt);
+    this.publish(message.envelope.sender, "messages.v1.acknowledged", {
+      channelId,
+      messageId,
+      acknowledgedAt,
+    });
+    return { channelId, messageId, status: "acknowledged", acknowledgedAt };
+  }
+
+  private authorizedParticipant(session: RelaySession, channel: RelayChannel): Address {
+    if (this.hub.isAuthorized(session, channel.participantA)) return channel.participantA;
+    if (this.hub.isAuthorized(session, channel.participantB)) return channel.participantB;
+    throw new RelayError("UNAUTHORIZED", "session is not authorized for this channel");
+  }
+
   private channelPayload(channel: RelayChannel): RpcPayload {
     return {
       participantA: channel.participantA,
@@ -386,10 +494,10 @@ export class RelayCore {
 
   private publish(
     signer: Address,
-    method: Extract<ProtocolMethod, `channels.v1.${string}`>,
+    method: ProtocolMethod,
     payload: RpcPayload,
-  ): void {
-    this.hub.publish(
+  ): number {
+    return this.hub.publish(
       signer,
       createRpcMessage(RpcMessageType.Event, 0, method, payload, this.now()),
     );

@@ -16,7 +16,14 @@ import {
   type Hex,
   type StateAuthorization,
 } from "@offlane/protocol";
-import { OfflaneClient, WebSocketTransport, type RelayAuthSigner } from "@offlane/sdk";
+import {
+  decryptMessageText,
+  encryptMessage,
+  generateMessagingKeyPair,
+  OfflaneClient,
+  WebSocketTransport,
+  type RelayAuthSigner,
+} from "@offlane/sdk";
 import {
   createPublicClient,
   encodeFunctionData,
@@ -92,6 +99,17 @@ const channelManagerAbi = [
       { name: "state", type: "tuple", components: stateComponents() },
       { name: "authorizationA", type: "tuple", components: authorizationComponents() },
       { name: "authorizationB", type: "tuple", components: authorizationComponents() },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "cooperativeClose",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "state", type: "tuple", components: stateComponents() },
+      { name: "signatureA", type: "bytes" },
+      { name: "signatureB", type: "bytes" },
     ],
     outputs: [],
   },
@@ -251,12 +269,18 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-async function startRelay(root: string, database: string, port: number): Promise<ChildProcess> {
+async function startRelay(
+  root: string,
+  database: string,
+  port: number,
+  deploymentBlock: bigint,
+): Promise<ChildProcess> {
   const child = spawn(process.execPath, [join(root, "services/relay/dist/main.js")], {
     cwd: join(root, "services/relay"),
     env: {
       ...process.env,
       OFFLANE_DATABASE_PATH: database,
+      OFFLANE_DEPLOYMENT_BLOCK: deploymentBlock.toString(),
       OFFLANE_CONFIRMATIONS: "0",
       OFFLANE_POLL_INTERVAL_MS: "250",
       HOST: "127.0.0.1",
@@ -268,7 +292,11 @@ async function startRelay(root: string, database: string, port: number): Promise
   child.stdout?.on("data", (chunk) => (diagnostics += chunk.toString()));
   child.stderr?.on("data", (chunk) => (diagnostics += chunk.toString()));
   const health = `http://127.0.0.1:${port}/health`;
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+  const startupTimeoutMs = Number(
+    process.env.OFFLANE_DEMO_RELAY_STARTUP_TIMEOUT_MS ?? "120000",
+  );
+  const deadline = Date.now() + startupTimeoutMs;
+  while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`relay exited during startup: ${diagnostics}`);
     try {
       const response = await fetch(health);
@@ -289,6 +317,25 @@ async function stopRelay(child: ChildProcess): Promise<void> {
       child.kill("SIGKILL");
     }),
   ]);
+}
+
+async function emergencyClose(
+  settings: DemoConfig,
+  domain: TypedDataDomain,
+  alice: LocalAccount,
+  bob: LocalAccount,
+  state: ChannelState,
+): Promise<string> {
+  const [signatureA, signatureB] = await Promise.all([
+    signState(alice, domain, state),
+    signState(bob, domain, state),
+  ]);
+  const data = encodeFunctionData({
+    abi: channelManagerAbi,
+    functionName: "cooperativeClose",
+    args: [state, signatureA, signatureB],
+  });
+  return sendTempoTransaction(settings.rpcUrl, settings.aliceKey, settings.manager, data);
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -386,10 +433,13 @@ async function main(): Promise<void> {
   if (liveChainId !== MODERATO_CHAIN_ID) {
     throw new Error(`refusing to run on chain ${liveChainId}; expected Moderato 42431`);
   }
+  const demoDeploymentBlock = await publicClient.getBlockNumber();
 
   const alice = privateKeyToAccount(settings.aliceKey);
   const bob = privateKeyToAccount(settings.bobKey);
   const aliceAgent = privateKeyToAccount(generatePrivateKey());
+  const aliceMessaging = generateMessagingKeyPair();
+  const bobMessaging = generateMessagingKeyPair();
   const domain = {
     name: "Tempo.ChannelManager",
     version: "1",
@@ -454,11 +504,22 @@ async function main(): Promise<void> {
   const database = join(temporary, "relay.sqlite");
   const port = await freePort();
   const socketUrl = `ws://127.0.0.1:${port}/ws`;
-  let relay = await startRelay(root, database, port);
-  let agentClient = client(socketUrl);
-  let bobClient = client(socketUrl);
+  let relay: ChildProcess | undefined;
+  let agentClient: OfflaneClient | undefined;
+  let bobClient: OfflaneClient | undefined;
+  let settled = false;
+  let latestAgreedState: ChannelState = {
+    channelId,
+    nonce: 0n,
+    balanceA: DEPOSIT,
+    balanceB: DEPOSIT,
+    appDataHash: ZERO_HASH,
+  };
 
   try {
+    relay = await startRelay(root, database, port, demoDeploymentBlock);
+    agentClient = client(socketUrl);
+    bobClient = client(socketUrl);
     await Promise.all([agentClient.connect(), bobClient.connect()]);
     await Promise.all([
       agentClient.authenticate(authSigner(aliceAgent)),
@@ -485,11 +546,36 @@ async function main(): Promise<void> {
     await agentClient.registerCapability(capability, capabilitySignature);
     const initial = await waitForRelayState(agentClient, channelId, 0n);
 
+    const encryptedRequest = encryptMessage({
+      channelId,
+      sender: alice.address,
+      recipient: bob.address,
+      sequence: 1n,
+      stateNonce: 1n,
+      senderKeyPair: aliceMessaging,
+      recipientPublicKey: bobMessaging.publicKey,
+      plaintext: JSON.stringify({
+        type: "agent.request",
+        task: "summarize",
+        input: "OffLane carries encrypted AI work with bidirectional payment.",
+      }),
+    });
+    await agentClient.sendMessage(encryptedRequest);
+    const bobInbox = await bobClient.listMessages(channelId);
+    const receivedRequest = bobInbox.find(
+      (record) => record.envelope.messageId === encryptedRequest.messageId,
+    );
+    if (!receivedRequest) throw new Error("Bob did not receive the encrypted request");
+    const requestPlaintext = decryptMessageText(receivedRequest.envelope, bobMessaging);
+    await bobClient.acknowledgeMessage(channelId, encryptedRequest.messageId);
+    console.log(`Bob decrypted request: ${requestPlaintext}`);
+
     const stateOne: ChannelState = {
       ...initial,
       nonce: 1n,
       balanceA: initial.balanceA - A_TO_B,
       balanceB: initial.balanceB + A_TO_B,
+      appDataHash: encryptedRequest.messageId,
     };
     const authorizationAOne: StateAuthorization = {
       kind: "capability",
@@ -498,6 +584,8 @@ async function main(): Promise<void> {
       capabilitySignature,
     };
     const proposalOne = `0x${randomBytes(32).toString("hex")}` as Bytes32;
+    const authorizationBOne = directAuthorization(await signState(bob, domain, stateOne));
+    latestAgreedState = stateOne;
     await agentClient.proposeState({
       proposalId: proposalOne,
       proposer: alice.address,
@@ -509,15 +597,42 @@ async function main(): Promise<void> {
       proposalId: proposalOne,
       accepter: bob.address,
       state: stateOne,
-      authorization: directAuthorization(await signState(bob, domain, stateOne)),
+      authorization: authorizationBOne,
     });
     console.log("Accepted A -> B payment: 2 PathUSD (nonce 1)");
+
+    const encryptedResponse = encryptMessage({
+      channelId,
+      sender: bob.address,
+      recipient: alice.address,
+      sequence: 1n,
+      stateNonce: 2n,
+      senderKeyPair: bobMessaging,
+      recipientPublicKey: aliceMessaging.publicKey,
+      plaintext: JSON.stringify({
+        type: "agent.response",
+        result: "OffLane combines private messages with collateralized state updates.",
+      }),
+    });
+    await bobClient.sendMessage(encryptedResponse);
+    const aliceInbox = await agentClient.listMessages(channelId);
+    const receivedResponse = aliceInbox.find(
+      (record) => record.envelope.messageId === encryptedResponse.messageId,
+    );
+    if (!receivedResponse) throw new Error("Alice did not receive the encrypted response");
+    const responsePlaintext = decryptMessageText(
+      receivedResponse.envelope,
+      aliceMessaging,
+    );
+    await agentClient.acknowledgeMessage(channelId, encryptedResponse.messageId);
+    console.log(`Alice agent decrypted response: ${responsePlaintext}`);
 
     const stateTwo: ChannelState = {
       ...stateOne,
       nonce: 2n,
       balanceA: stateOne.balanceA + B_TO_A,
       balanceB: stateOne.balanceB - B_TO_A,
+      appDataHash: encryptedResponse.messageId,
     };
     const authorizationBTwo = directAuthorization(await signState(bob, domain, stateTwo));
     const authorizationATwo: StateAuthorization = {
@@ -526,6 +641,7 @@ async function main(): Promise<void> {
       capability,
       capabilitySignature,
     };
+    latestAgreedState = stateTwo;
     const proposalTwo = `0x${randomBytes(32).toString("hex")}` as Bytes32;
     await bobClient.proposeState({
       proposalId: proposalTwo,
@@ -544,7 +660,7 @@ async function main(): Promise<void> {
 
     await Promise.all([agentClient.close(), bobClient.close()]);
     await stopRelay(relay);
-    relay = await startRelay(root, database, port);
+    relay = await startRelay(root, database, port, demoDeploymentBlock);
     agentClient = client(socketUrl);
     bobClient = client(socketUrl);
     await Promise.all([agentClient.connect(), bobClient.connect()]);
@@ -557,7 +673,22 @@ async function main(): Promise<void> {
     if (recovered.balanceA !== 9_000_000n || recovered.balanceB !== 11_000_000n) {
       throw new Error("relay recovered unexpected balances after restart");
     }
+    const [recoveredForAlice, recoveredForBob] = await Promise.all([
+      agentClient.listMessages(channelId),
+      bobClient.listMessages(channelId),
+    ]);
+    if (
+      recoveredForAlice[0]?.status !== "acknowledged" ||
+      recoveredForBob[0]?.status !== "acknowledged" ||
+      decryptMessageText(recoveredForAlice[0].envelope, aliceMessaging) !==
+        responsePlaintext ||
+      decryptMessageText(recoveredForBob[0].envelope, bobMessaging) !==
+        requestPlaintext
+    ) {
+      throw new Error("encrypted messages did not survive relay restart");
+    }
     console.log("SQLite restart recovery: nonce 2, balances 9/11 PathUSD");
+    console.log("Encrypted messages and acknowledgements recovered after restart");
 
     const closeData = encodeFunctionData({
       abi: channelManagerAbi,
@@ -574,6 +705,7 @@ async function main(): Promise<void> {
       settings.manager,
       closeData,
     );
+    settled = true;
     console.log(`Cooperative close: ${closeTransaction}`);
 
     const closed = await publicClient.readContract({
@@ -585,9 +717,32 @@ async function main(): Promise<void> {
     if (closed.status !== 0) throw new Error(`channel status is ${closed.status}, expected VOID`);
     console.log("On-chain settlement verified: channel storage is VOID");
     console.log("AGENT DEMO PASSED");
+  } catch (error) {
+    if (!settled) {
+      try {
+        const recoveryTransaction = await emergencyClose(
+          settings,
+          domain,
+          alice,
+          bob,
+          latestAgreedState,
+        );
+        settled = true;
+        console.error(`Emergency cooperative close: ${recoveryTransaction}`);
+      } catch (recoveryError) {
+        throw new AggregateError(
+          [error, recoveryError],
+          "agent demo failed and emergency settlement also failed",
+        );
+      }
+    }
+    throw error;
   } finally {
-    await Promise.allSettled([agentClient.close(), bobClient.close()]);
-    await stopRelay(relay);
+    await Promise.allSettled([
+      agentClient?.close() ?? Promise.resolve(),
+      bobClient?.close() ?? Promise.resolve(),
+    ]);
+    if (relay) await stopRelay(relay);
     await rm(temporary, { recursive: true, force: true });
   }
 }

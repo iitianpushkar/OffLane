@@ -10,8 +10,8 @@ step was Nitrolite commit `111b7e5b03f9bed3faa6558ae4b88f3965301709`.
 | --- | --- | --- |
 | [`sdk/ts/src/rpc/message.ts`](https://github.com/layer-3/nitrolite/blob/111b7e5b03f9bed3faa6558ae4b88f3965301709/sdk/ts/src/rpc/message.ts) | Compact `[type, requestId, method, payload, timestamp]` JSON frames | `packages/protocol/src/rpc.ts` |
 | [`sdk/ts/src/rpc/dialer.ts`](https://github.com/layer-3/nitrolite/blob/111b7e5b03f9bed3faa6558ae4b88f3965301709/sdk/ts/src/rpc/dialer.ts) | Transport boundary, pending-request correlation, unsolicited events, cancellation | `packages/sdk/src/transport.ts`, `packages/sdk/src/client.ts` |
-| [`sdk/ts/src/rpc/methods.ts`](https://github.com/layer-3/nitrolite/blob/111b7e5b03f9bed3faa6558ae4b88f3965301709/sdk/ts/src/rpc/methods.ts) | Versioned method names grouped by domain | `node.v1.*`, `channels.v1.*` |
-| [`sdk/ts/src/signers.ts`](https://github.com/layer-3/nitrolite/blob/111b7e5b03f9bed3faa6558ae4b88f3965301709/sdk/ts/src/signers.ts) | Signing authority is an SDK boundary rather than relay-owned key material | Existing `StateAuthorization`; signer adapters are the next SDK slice |
+| [`sdk/ts/src/rpc/methods.ts`](https://github.com/layer-3/nitrolite/blob/111b7e5b03f9bed3faa6558ae4b88f3965301709/sdk/ts/src/rpc/methods.ts) | Versioned method names grouped by domain | `node.v1.*`, `channels.v1.*`, `messages.v1.*` |
+| [`sdk/ts/src/signers.ts`](https://github.com/layer-3/nitrolite/blob/111b7e5b03f9bed3faa6558ae4b88f3965301709/sdk/ts/src/signers.ts) | Signing authority is an SDK boundary rather than relay-owned key material | `StateAuthorization` keeps participant and delegated-agent signing outside the relay |
 | [`nitronode`](https://github.com/layer-3/nitrolite/tree/111b7e5b03f9bed3faa6558ae4b88f3965301709/nitronode) | Relay router, storage boundary, connection hub, confirmed event replay, and persistent cursor | `services/relay` with SQLite and a Tempo `ChannelManager` indexer |
 
 ## What differs intentionally
@@ -44,9 +44,20 @@ The initial method surface is:
 - `channels.v1.reject_state`
 - `channels.v1.get_state`
 - `channels.v1.state_updated`
+- `messages.v1.send`
+- `messages.v1.list`
+- `messages.v1.acknowledge`
+- `messages.v1.received`
+- `messages.v1.acknowledged`
 
 The relay imports these schemas directly. Its drift test compares the complete
 request-method registry with the router, preventing the relay and SDK from
 silently disagreeing about method names. The runtime uses SQLite behind the
 same store boundary and replays confirmed `ChannelManager` events from a
 durable cursor without changing RPC routing or state validation.
+
+OffLane's encrypted-envelope format is its own Tempo channel extension rather
+than a copied Nitrolite wire type. It preserves the referenced separation of
+transport, routing, and cryptographic authority: endpoint SDKs encrypt and
+decrypt, the relay routes opaque bytes, and both participants sign the state
+that commits to the ciphertext.

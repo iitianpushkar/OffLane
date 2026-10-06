@@ -4,6 +4,8 @@ import {
   bytes32Schema,
   channelCapabilityWireSchema,
   channelStateWireSchema,
+  encryptedEnvelopeWireSchema,
+  encryptedMessageRecordWireSchema,
   hexSchema,
   protocolMethodSchema,
   stateAuthorizationWireSchema,
@@ -88,6 +90,28 @@ export const stateRejectionWireSchema = z
 
 export const stateQueryWireSchema = z
   .object({ channelId: bytes32Schema })
+  .strict();
+
+export const messageSendWireSchema = z
+  .object({ envelope: encryptedEnvelopeWireSchema })
+  .strict();
+
+export const messageListWireSchema = z
+  .object({
+    channelId: bytes32Schema,
+    afterSequence: uint64StringSchema.optional(),
+  })
+  .strict();
+
+export const messageAcknowledgementWireSchema = z
+  .object({
+    channelId: bytes32Schema,
+    messageId: bytes32Schema,
+  })
+  .strict();
+
+export const messageListResponseWireSchema = z
+  .object({ messages: z.array(encryptedMessageRecordWireSchema).max(1_000) })
   .strict();
 
 export const rpcErrorPayloadSchema = z

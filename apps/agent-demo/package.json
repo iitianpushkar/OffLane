@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "pretypecheck": "pnpm --filter @offlane/sdk build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node --env-file=../../.env dist/main.js"
   },

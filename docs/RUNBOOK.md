@@ -142,9 +142,13 @@ experiments.
 
 The agent demo is the full relay path. It starts an isolated relay, opens and
 joins a 10/10 PathUSD channel, gives an ephemeral Alice agent a root-signed
-3 PathUSD spending capability, accepts payments in both directions, restarts
-the relay to prove SQLite recovery, and closes with the agent capability as
-Alice's settlement evidence.
+3 PathUSD spending capability, and creates dedicated X25519 messaging keys for
+Alice's agent and Bob. The agent encrypts a request and pays Bob 2 PathUSD;
+Bob decrypts and acknowledges it, encrypts a response, and pays 1 PathUSD
+back. Each envelope's commitment becomes the matching payment state's
+`appDataHash`. The demo restarts the relay to prove state, ciphertext, and
+acknowledgement recovery, then closes with the agent capability as Alice's
+settlement evidence.
 
 The ignored root `.env` must contain the Moderato RPC configuration and funded,
 disposable `ALICE_PK` and `BOB_PK` test keys. Then run:
@@ -156,8 +160,11 @@ pnpm --filter @offlane/agent-demo start
 
 The command refuses any live chain ID other than Moderato `42431`. It creates a
 temporary SQLite database and removes it after the final on-chain settlement.
+Its isolated indexer starts at the block immediately before the demo. If a
+relay step fails after join, both root test keys cooperatively settle the newest
+mutually signed state before the command exits with an error.
 
-The first verified run used channel
-`0xe5ba669256b66e9245996f790f78964588cb66121ae13ef64c3b2f8bc5aeffa0`
-and settled it in transaction
-[`0xf78f1fd3…68ca5a3`](https://explore.tempo.xyz/tx/0xf78f1fd3279542ac73a9aeb548c4103f6eae0abcc9d398b1cb0a3ee2f68ca5a3).
+The verified encrypted run used channel
+`0xb43d0015b9d0e7f073321418cc2bde57f343fb4cac56a38346ddf315dec18351`
+and settled its recovered 9/11 PathUSD state in transaction
+[`0x10a1b4a6…a129cbe`](https://explore.tempo.xyz/tx/0x10a1b4a61db6c8ee51a4be26601df971a9a40212f215bca7e3934a69aa129cbe).

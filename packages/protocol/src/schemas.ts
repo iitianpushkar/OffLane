@@ -5,6 +5,8 @@ import type {
   Bytes32,
   ChannelCapability,
   ChannelState,
+  EncryptedEnvelope,
+  EncryptedMessageRecord,
   StateAuthorization,
 } from "./types.js";
 
@@ -26,6 +28,11 @@ export const bytes32Schema = z
 export const hexSchema = z
   .string()
   .regex(/^0x(?:[0-9a-fA-F]{2})*$/, "must be byte-aligned hex")
+  .transform((value) => value as `0x${string}`);
+
+export const bytes24Schema = z
+  .string()
+  .regex(/^0x[0-9a-fA-F]{48}$/, "must be a 24-byte hex value")
   .transform((value) => value as `0x${string}`);
 
 export const uint64StringSchema = canonicalUint.refine(
@@ -97,12 +104,17 @@ export const protocolRequestMethods = [
   "channels.v1.accept_state",
   "channels.v1.reject_state",
   "channels.v1.get_state",
+  "messages.v1.send",
+  "messages.v1.list",
+  "messages.v1.acknowledge",
 ] as const;
 
 export const protocolEventMethods = [
   "channels.v1.state_proposed",
   "channels.v1.state_rejected",
   "channels.v1.state_updated",
+  "messages.v1.received",
+  "messages.v1.acknowledged",
 ] as const;
 
 export const protocolMethodSchema = z.enum([
@@ -170,4 +182,51 @@ export function encodeStateAuthorization(authorization: StateAuthorization):
     ...authorization,
     capability: encodeChannelCapability(authorization.capability),
   };
+}
+
+export const encryptedEnvelopeWireSchema = z
+  .object({
+    protocolVersion: z.literal(1),
+    messageId: bytes32Schema,
+    channelId: bytes32Schema,
+    sender: addressSchema,
+    recipient: addressSchema,
+    sequence: uint64StringSchema,
+    stateNonce: uint64StringSchema,
+    senderPublicKey: bytes32Schema,
+    recipientPublicKey: bytes32Schema,
+    encryptionNonce: bytes24Schema,
+    ciphertext: hexSchema.refine((value) => value.length <= 131_106, {
+      message: "ciphertext exceeds 64 KiB",
+    }),
+    contentType: z.string().min(1).max(128),
+  })
+  .strict();
+
+export const messageDeliveryStatusSchema = z.enum([
+  "sent",
+  "delivered",
+  "acknowledged",
+]);
+
+export const encryptedMessageRecordWireSchema = z
+  .object({
+    envelope: encryptedEnvelopeWireSchema,
+    status: messageDeliveryStatusSchema,
+    sentAt: z.number().int().nonnegative().safe(),
+    deliveredAt: z.number().int().nonnegative().safe().optional(),
+    acknowledgedAt: z.number().int().nonnegative().safe().optional(),
+  })
+  .strict();
+
+export function encodeEncryptedEnvelope(envelope: EncryptedEnvelope) {
+  return {
+    ...envelope,
+    sequence: envelope.sequence.toString(),
+    stateNonce: envelope.stateNonce.toString(),
+  };
+}
+
+export function encodeEncryptedMessageRecord(record: EncryptedMessageRecord) {
+  return { ...record, envelope: encodeEncryptedEnvelope(record.envelope) };
 }

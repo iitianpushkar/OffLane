@@ -1,12 +1,15 @@
 import { DatabaseSync } from "node:sqlite";
 import {
   encodeChannelState,
+  encodeEncryptedEnvelope,
   encodeStateAuthorization,
   channelStateWireSchema,
+  encryptedEnvelopeWireSchema,
   stateAuthorizationWireSchema,
   stateProposalWireSchema,
   type Address,
   type Bytes32,
+  type EncryptedMessageRecord,
   type StateAcceptanceMessage,
 } from "@offlane/protocol";
 import type {
@@ -30,6 +33,14 @@ interface ChannelRow {
 interface ProposalRow {
   proposal: string;
   created_at: number;
+}
+
+interface MessageRow {
+  envelope: string;
+  status: "sent" | "delivered" | "acknowledged";
+  sent_at: number;
+  delivered_at: number | null;
+  acknowledged_at: number | null;
 }
 
 function stringify(value: unknown): string {
@@ -118,6 +129,20 @@ export class SqliteRelayStore implements RelayStore {
         last_block TEXT NOT NULL,
         PRIMARY KEY (chain_id, contract_address)
       );
+      CREATE TABLE IF NOT EXISTS encrypted_messages (
+        message_id TEXT PRIMARY KEY,
+        channel_id TEXT NOT NULL REFERENCES channels(channel_id) ON DELETE CASCADE,
+        recipient TEXT NOT NULL,
+        sequence TEXT NOT NULL,
+        envelope TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('sent', 'delivered', 'acknowledged')),
+        sent_at INTEGER NOT NULL,
+        delivered_at INTEGER,
+        acknowledged_at INTEGER,
+        UNIQUE(channel_id, recipient, sequence)
+      );
+      CREATE INDEX IF NOT EXISTS encrypted_messages_recipient
+        ON encrypted_messages(channel_id, recipient);
     `);
   }
 
@@ -370,7 +395,96 @@ export class SqliteRelayStore implements RelayStore {
       );
   }
 
+  async saveMessage(record: EncryptedMessageRecord): Promise<void> {
+    this.database
+      .prepare(`
+        INSERT INTO encrypted_messages (
+          message_id, channel_id, recipient, sequence, envelope, status,
+          sent_at, delivered_at, acknowledged_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        record.envelope.messageId.toLowerCase(),
+        record.envelope.channelId.toLowerCase(),
+        record.envelope.recipient.toLowerCase(),
+        record.envelope.sequence.toString(),
+        stringify(encodeEncryptedEnvelope(record.envelope)),
+        record.status,
+        record.sentAt,
+        record.deliveredAt ?? null,
+        record.acknowledgedAt ?? null,
+      );
+  }
+
+  async getMessage(messageId: Bytes32): Promise<EncryptedMessageRecord | undefined> {
+    const row = this.database
+      .prepare(`
+        SELECT envelope, status, sent_at, delivered_at, acknowledged_at
+        FROM encrypted_messages WHERE message_id = ?
+      `)
+      .get(messageId.toLowerCase()) as MessageRow | undefined;
+    return row ? decodeMessage(row) : undefined;
+  }
+
+  async listMessages(
+    channelId: Bytes32,
+    recipient: Address,
+    afterSequence = -1n,
+  ): Promise<EncryptedMessageRecord[]> {
+    const rows = this.database
+      .prepare(`
+        SELECT envelope, status, sent_at, delivered_at, acknowledged_at
+        FROM encrypted_messages
+        WHERE channel_id = ? AND recipient = ?
+      `)
+      .all(channelId.toLowerCase(), recipient.toLowerCase()) as unknown as MessageRow[];
+    return rows
+      .map(decodeMessage)
+      .filter((record) => record.envelope.sequence > afterSequence)
+      .sort((left, right) => {
+        if (left.envelope.sequence < right.envelope.sequence) return -1;
+        if (left.envelope.sequence > right.envelope.sequence) return 1;
+        return left.sentAt - right.sentAt;
+      })
+      .slice(0, 1000);
+  }
+
+  async markMessageDelivered(messageId: Bytes32, deliveredAt: number): Promise<void> {
+    this.database
+      .prepare(`
+        UPDATE encrypted_messages
+        SET status = 'delivered', delivered_at = ?
+        WHERE message_id = ? AND status = 'sent'
+      `)
+      .run(deliveredAt, messageId.toLowerCase());
+  }
+
+  async acknowledgeMessage(messageId: Bytes32, acknowledgedAt: number): Promise<void> {
+    const result = this.database
+      .prepare(`
+        UPDATE encrypted_messages
+        SET status = 'acknowledged',
+            delivered_at = COALESCE(delivered_at, ?),
+            acknowledged_at = ?
+        WHERE message_id = ?
+      `)
+      .run(acknowledgedAt, acknowledgedAt, messageId.toLowerCase());
+    if (result.changes !== 1) throw new Error("message does not exist");
+  }
+
   close(): void {
     this.database.close();
   }
+}
+
+function decodeMessage(row: MessageRow): EncryptedMessageRecord {
+  return {
+    envelope: encryptedEnvelopeWireSchema.parse(JSON.parse(row.envelope)),
+    status: row.status,
+    sentAt: row.sent_at,
+    ...(row.delivered_at === null ? {} : { deliveredAt: row.delivered_at }),
+    ...(row.acknowledged_at === null
+      ? {}
+      : { acknowledgedAt: row.acknowledged_at }),
+  };
 }

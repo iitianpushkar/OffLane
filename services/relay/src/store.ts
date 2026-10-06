@@ -2,6 +2,7 @@ import type {
   Address,
   Bytes32,
   ChannelState,
+  EncryptedMessageRecord,
   StateAcceptanceMessage,
   StateAuthorization,
   StateProposalMessage,
@@ -51,6 +52,15 @@ export interface RelayStore {
     contractAddress: Address,
   ): Promise<bigint | undefined>;
   setIndexerCursor(cursor: IndexerCursor): Promise<void>;
+  saveMessage(record: EncryptedMessageRecord): Promise<void>;
+  getMessage(messageId: Bytes32): Promise<EncryptedMessageRecord | undefined>;
+  listMessages(
+    channelId: Bytes32,
+    recipient: Address,
+    afterSequence?: bigint,
+  ): Promise<EncryptedMessageRecord[]>;
+  markMessageDelivered(messageId: Bytes32, deliveredAt: number): Promise<void>;
+  acknowledgeMessage(messageId: Bytes32, acknowledgedAt: number): Promise<void>;
   close(): void;
 }
 
@@ -68,6 +78,7 @@ export class MemoryRelayStore implements RelayStore {
   private readonly proposals = new Map<string, PendingProposal>();
   private readonly proposalByChannel = new Map<string, string>();
   private readonly cursors = new Map<string, bigint>();
+  private readonly messages = new Map<string, EncryptedMessageRecord>();
 
   async getChannel(channelId: Bytes32): Promise<RelayChannel | undefined> {
     return this.channels.get(channelKey(channelId));
@@ -83,6 +94,9 @@ export class MemoryRelayStore implements RelayStore {
     if (proposalId) this.proposals.delete(proposalId);
     this.proposalByChannel.delete(key);
     this.channels.delete(key);
+    for (const [messageId, record] of this.messages) {
+      if (channelKey(record.envelope.channelId) === key) this.messages.delete(messageId);
+    }
   }
 
   async createChannelFromChain(channel: RelayChannel): Promise<void> {
@@ -124,6 +138,57 @@ export class MemoryRelayStore implements RelayStore {
       `${cursor.chainId}:${cursor.contractAddress.toLowerCase()}`,
       cursor.lastBlock,
     );
+  }
+
+  async saveMessage(record: EncryptedMessageRecord): Promise<void> {
+    const id = record.envelope.messageId.toLowerCase();
+    if (this.messages.has(id)) throw new Error("message already exists");
+    this.messages.set(id, record);
+  }
+
+  async getMessage(messageId: Bytes32): Promise<EncryptedMessageRecord | undefined> {
+    return this.messages.get(messageId.toLowerCase());
+  }
+
+  async listMessages(
+    channelId: Bytes32,
+    recipient: Address,
+    afterSequence = -1n,
+  ): Promise<EncryptedMessageRecord[]> {
+    return [...this.messages.values()]
+      .filter(
+        (record) =>
+          record.envelope.channelId.toLowerCase() === channelId.toLowerCase() &&
+          record.envelope.recipient.toLowerCase() === recipient.toLowerCase() &&
+          record.envelope.sequence > afterSequence,
+      )
+      .sort((left, right) => {
+        if (left.envelope.sequence < right.envelope.sequence) return -1;
+        if (left.envelope.sequence > right.envelope.sequence) return 1;
+        return left.sentAt - right.sentAt;
+      })
+      .slice(0, 1000);
+  }
+
+  async markMessageDelivered(messageId: Bytes32, deliveredAt: number): Promise<void> {
+    const record = await this.getMessage(messageId);
+    if (!record || record.status !== "sent") return;
+    this.messages.set(messageId.toLowerCase(), {
+      ...record,
+      status: "delivered",
+      deliveredAt,
+    });
+  }
+
+  async acknowledgeMessage(messageId: Bytes32, acknowledgedAt: number): Promise<void> {
+    const record = await this.getMessage(messageId);
+    if (!record) throw new Error("message does not exist");
+    this.messages.set(messageId.toLowerCase(), {
+      ...record,
+      status: "acknowledged",
+      deliveredAt: record.deliveredAt ?? acknowledgedAt,
+      acknowledgedAt,
+    });
   }
 
   close(): void {}

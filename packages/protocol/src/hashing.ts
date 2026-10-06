@@ -8,6 +8,7 @@ import type {
   Bytes32,
   ChannelCapability,
   ChannelState,
+  EncryptedEnvelope,
   PaymentMetadata,
 } from "./types.js";
 
@@ -89,4 +90,53 @@ export function hashPaymentMetadata(metadata: PaymentMetadata): Bytes32 {
   );
 
   return keccak256(encoded);
+}
+
+export function encodeEncryptedEnvelopeAad(
+  envelope: Omit<EncryptedEnvelope, "messageId" | "encryptionNonce" | "ciphertext">,
+): `0x${string}` {
+  return encodeAbiParameters(
+    [
+      { name: "protocolVersion", type: "uint8" },
+      { name: "channelId", type: "bytes32" },
+      { name: "sender", type: "address" },
+      { name: "recipient", type: "address" },
+      { name: "sequence", type: "uint64" },
+      { name: "stateNonce", type: "uint64" },
+      { name: "senderPublicKey", type: "bytes32" },
+      { name: "recipientPublicKey", type: "bytes32" },
+      { name: "contentTypeHash", type: "bytes32" },
+    ],
+    [
+      envelope.protocolVersion,
+      envelope.channelId,
+      envelope.sender,
+      envelope.recipient,
+      envelope.sequence,
+      envelope.stateNonce,
+      envelope.senderPublicKey,
+      envelope.recipientPublicKey,
+      keccak256(new TextEncoder().encode(envelope.contentType)),
+    ],
+  );
+}
+
+/** Canonical envelope commitment stored in ChannelState.appDataHash. */
+export function hashEncryptedEnvelope(
+  envelope: Omit<EncryptedEnvelope, "messageId">,
+): Bytes32 {
+  return keccak256(
+    encodeAbiParameters(
+      [
+        { name: "aadHash", type: "bytes32" },
+        { name: "encryptionNonce", type: "bytes24" },
+        { name: "ciphertextHash", type: "bytes32" },
+      ],
+      [
+        keccak256(encodeEncryptedEnvelopeAad(envelope)),
+        envelope.encryptionNonce,
+        keccak256(envelope.ciphertext),
+      ],
+    ),
+  );
 }

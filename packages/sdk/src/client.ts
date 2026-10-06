@@ -6,16 +6,20 @@ import {
   decodeRpcMessage,
   encodeChannelCapability,
   encodeChannelState,
+  encodeEncryptedEnvelope,
   encodeRpcMessage,
   encodeStateAuthorization,
   rpcErrorPayloadSchema,
   RpcMessageType,
+  messageListResponseWireSchema,
   stateAcceptanceWireSchema,
   stateProposalWireSchema,
   type ProtocolMethod,
   type Address,
   type Bytes32,
   type ChannelCapability,
+  type EncryptedEnvelope,
+  type EncryptedMessageRecord,
   type Hex,
   type RpcMessage,
   type RpcPayload,
@@ -251,6 +255,59 @@ export class OfflaneClient {
     options?: RpcCallOptions,
   ): Promise<RpcPayload> {
     return this.call("channels.v1.get_state", { channelId }, options);
+  }
+
+  async sendMessage(
+    envelope: EncryptedEnvelope,
+    options?: RpcCallOptions,
+  ): Promise<RpcPayload> {
+    return this.call(
+      "messages.v1.send",
+      { envelope: encodeEncryptedEnvelope(envelope) },
+      options,
+    );
+  }
+
+  async listMessages(
+    channelId: Bytes32,
+    afterSequence?: bigint,
+    options?: RpcCallOptions,
+  ): Promise<EncryptedMessageRecord[]> {
+    const response = messageListResponseWireSchema.parse(
+      await this.call(
+        "messages.v1.list",
+        {
+          channelId,
+          ...(afterSequence === undefined
+            ? {}
+            : { afterSequence: afterSequence.toString() }),
+        },
+        options,
+      ),
+    );
+    return response.messages.map((record) => ({
+      envelope: record.envelope,
+      status: record.status,
+      sentAt: record.sentAt,
+      ...(record.deliveredAt === undefined
+        ? {}
+        : { deliveredAt: record.deliveredAt }),
+      ...(record.acknowledgedAt === undefined
+        ? {}
+        : { acknowledgedAt: record.acknowledgedAt }),
+    }));
+  }
+
+  async acknowledgeMessage(
+    channelId: Bytes32,
+    messageId: Bytes32,
+    options?: RpcCallOptions,
+  ): Promise<RpcPayload> {
+    return this.call(
+      "messages.v1.acknowledge",
+      { channelId, messageId },
+      options,
+    );
   }
 
   async close(): Promise<void> {

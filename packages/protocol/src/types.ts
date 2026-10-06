@@ -22,6 +22,31 @@ export interface ChannelCapability {
   capabilityNonce: bigint;
 }
 
+export interface EncryptedEnvelope {
+  protocolVersion: 1;
+  messageId: Bytes32;
+  channelId: Bytes32;
+  sender: Address;
+  recipient: Address;
+  sequence: bigint;
+  stateNonce: bigint;
+  senderPublicKey: Bytes32;
+  recipientPublicKey: Bytes32;
+  encryptionNonce: Hex;
+  ciphertext: Hex;
+  contentType: string;
+}
+
+export type MessageDeliveryStatus = "sent" | "delivered" | "acknowledged";
+
+export interface EncryptedMessageRecord {
+  envelope: EncryptedEnvelope;
+  status: MessageDeliveryStatus;
+  sentAt: number;
+  deliveredAt?: number;
+  acknowledgedAt?: number;
+}
+
 export type StateAuthorization =
   | {
       kind: "direct";

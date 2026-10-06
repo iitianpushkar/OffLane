@@ -5,6 +5,7 @@ import type {
   Address,
   Bytes32,
   ChannelState,
+  EncryptedEnvelope,
   StateAcceptanceMessage,
   StateProposalMessage,
 } from "@offlane/protocol";
@@ -48,6 +49,25 @@ describe("SqliteRelayStore", () => {
       state: next,
       authorization: { kind: "direct", stateSignature: "0xabcd" },
     };
+    const envelope: EncryptedEnvelope = {
+      protocolVersion: 1,
+      messageId: `0x${"33".repeat(32)}` as Bytes32,
+      channelId: CHANNEL,
+      sender: A,
+      recipient: B,
+      sequence: 1n,
+      stateNonce: 1n,
+      senderPublicKey: `0x${"44".repeat(32)}` as Bytes32,
+      recipientPublicKey: `0x${"55".repeat(32)}` as Bytes32,
+      encryptionNonce: `0x${"66".repeat(24)}`,
+      ciphertext: "0x1234",
+      contentType: "application/json",
+    };
+    const highSequenceEnvelope: EncryptedEnvelope = {
+      ...envelope,
+      messageId: `0x${"77".repeat(32)}` as Bytes32,
+      sequence: 1n << 63n,
+    };
 
     try {
       let store = new SqliteRelayStore(path);
@@ -59,6 +79,12 @@ describe("SqliteRelayStore", () => {
         current: initial,
       });
       await store.savePending({ proposal, createdAt: 123 });
+      await store.saveMessage({
+        envelope: highSequenceEnvelope,
+        status: "sent",
+        sentAt: 123,
+      });
+      await store.saveMessage({ envelope, status: "sent", sentAt: 124 });
       await store.setIndexerCursor({
         chainId: 42431,
         contractAddress: A,
@@ -72,6 +98,15 @@ describe("SqliteRelayStore", () => {
         createdAt: 123,
       });
       expect(await store.getIndexerCursor(42431, A)).toBe(99n);
+      expect(await store.listMessages(CHANNEL, B)).toEqual([
+        { envelope, status: "sent", sentAt: 124 },
+        { envelope: highSequenceEnvelope, status: "sent", sentAt: 123 },
+      ]);
+      expect(await store.listMessages(CHANNEL, B, 1n)).toEqual([
+        { envelope: highSequenceEnvelope, status: "sent", sentAt: 123 },
+      ]);
+      await store.markMessageDelivered(envelope.messageId, 125);
+      await store.acknowledgeMessage(envelope.messageId, 126);
       const channel = await store.getChannel(CHANNEL);
       expect(channel?.current).toEqual(initial);
       await store.commitAccepted(channel!, PROPOSAL, acceptance);
@@ -83,6 +118,13 @@ describe("SqliteRelayStore", () => {
       expect(restored?.authorizationA).toEqual(proposal.authorization);
       expect(restored?.authorizationB).toEqual(acceptance.authorization);
       expect(await store.getPending(PROPOSAL)).toBeUndefined();
+      expect(await store.getMessage(envelope.messageId)).toEqual({
+        envelope,
+        status: "acknowledged",
+        sentAt: 124,
+        deliveredAt: 125,
+        acknowledgedAt: 126,
+      });
       store.close();
     } finally {
       rmSync(directory, { recursive: true, force: true });

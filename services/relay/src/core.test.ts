@@ -4,14 +4,17 @@ import {
   createRpcMessage,
   encodeChannelCapability,
   encodeChannelState,
+  encodeEncryptedEnvelope,
   encodeStateAuthorization,
   hashChannelState,
+  hashEncryptedEnvelope,
   protocolRequestMethods,
   RpcMessageType,
   type Address,
   type Bytes32,
   type ChannelCapability,
   type ChannelState,
+  type EncryptedEnvelope,
   type ProtocolMethod,
   type RpcMessage,
   type RpcPayload,
@@ -359,5 +362,110 @@ describe("RelayCore", () => {
       code: "INVALID_SIGNATURE",
       message: "proposal authorization is invalid",
     });
+  });
+
+  it("routes, persists, acknowledges, and binds encrypted messages to states", async () => {
+    const store = new MemoryRelayStore();
+    const initial: ChannelState = {
+      channelId: CHANNEL,
+      nonce: 0n,
+      balanceA: 100n,
+      balanceB: 100n,
+      appDataHash: EMPTY_HASH,
+    };
+    await store.saveChannel({
+      participantA: alice.address,
+      participantB: bob.address,
+      token: TOKEN,
+      status: "open",
+      current: initial,
+    });
+    const core = new RelayCore(
+      store,
+      new ViemAuthorizationVerifier(domain),
+      domain,
+      undefined,
+      { now: () => NOW },
+    );
+    const aliceSession = session("alice-message");
+    const bobSession = session("bob-message");
+    await authenticate(core, aliceSession, alice);
+    await authenticate(core, bobSession, bob);
+
+    const committed = {
+      protocolVersion: 1 as const,
+      channelId: CHANNEL,
+      sender: alice.address,
+      recipient: bob.address,
+      sequence: 1n,
+      stateNonce: 1n,
+      senderPublicKey: `0x${"31".repeat(32)}` as Bytes32,
+      recipientPublicKey: `0x${"32".repeat(32)}` as Bytes32,
+      encryptionNonce: `0x${"33".repeat(24)}` as `0x${string}`,
+      ciphertext: "0x1234" as `0x${string}`,
+      contentType: "application/json",
+    };
+    const envelope: EncryptedEnvelope = {
+      ...committed,
+      messageId: hashEncryptedEnvelope(committed),
+    };
+    const sent = await core.handle(
+      aliceSession,
+      request("messages.v1.send", { envelope: encodeEncryptedEnvelope(envelope) }),
+    );
+    expect(sent.status).toBe("delivered");
+    expect(bobSession.events.at(-1)?.method).toBe("messages.v1.received");
+
+    const listed = await core.handle(
+      bobSession,
+      request("messages.v1.list", { channelId: CHANNEL }),
+    );
+    expect((listed.messages as unknown[])).toHaveLength(1);
+    await core.handle(
+      bobSession,
+      request("messages.v1.acknowledge", {
+        channelId: CHANNEL,
+        messageId: envelope.messageId,
+      }),
+    );
+    expect((await store.getMessage(envelope.messageId))?.status).toBe("acknowledged");
+    expect(aliceSession.events.at(-1)?.method).toBe("messages.v1.acknowledged");
+
+    const next: ChannelState = {
+      ...initial,
+      nonce: 1n,
+      balanceA: 90n,
+      balanceB: 110n,
+      appDataHash: envelope.messageId,
+    };
+    const proposalId = `0x${"44".repeat(32)}` as Bytes32;
+    await core.handle(
+      aliceSession,
+      request(
+        "channels.v1.propose_state",
+        proposalPayload(
+          proposalId,
+          alice.address,
+          hashChannelState(domain, initial),
+          next,
+          await directAuthorization(alice, next),
+        ),
+      ),
+    );
+    await core.handle(
+      bobSession,
+      request(
+        "channels.v1.accept_state",
+        acceptancePayload(
+          proposalId,
+          bob.address,
+          next,
+          await directAuthorization(bob, next),
+        ),
+      ),
+    );
+    expect((await store.getChannel(CHANNEL))?.current.appDataHash).toBe(
+      envelope.messageId,
+    );
   });
 });
