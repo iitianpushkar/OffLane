@@ -191,25 +191,34 @@ signed state before returning the error so test collateral is not left locked.
 
 ## Run the web product
 
-The web package contains a public homepage and a wallet-authenticated product
-workspace. From the app, a user can authenticate with the relay, list indexed
-channels, open a channel, exchange an invitation with a counterparty, join a
-pending channel, and generate and authorize a channel-scoped agent key with a
-hard spending limit. The server starts the persistent relay automatically.
+The Next.js web package contains a public homepage and a wallet-authenticated
+product workspace. From the app, a user can authenticate with the relay, list
+indexed channels, open a channel, exchange an invitation with a counterparty,
+join a pending channel, and generate and authorize a channel-scoped agent key
+with a hard spending limit.
 
 The earlier execution dashboard remains available under `/demo` as an
 optional technical proof. Test keys used by that proof remain in the local
 Node process and are never returned to browser code.
 
-With the disposable test keys and Moderato configuration in `.env`:
+Build the workspace, then run the persistent relay and Next.js frontend in
+separate terminals:
 
 ```bash
 pnpm build
+pnpm --filter @offlane/relay start
+```
+
+```bash
 pnpm dashboard
 ```
 
 Open `http://127.0.0.1:4173`. The product only configures Tempo Moderato chain
 ID `42431`; every signature and transaction still requires wallet approval.
+The Next.js app is deployable to Vercel. Its `OFFLANE_BROWSER_RELAY_URL` must
+point to a separately hosted TLS WebSocket relay (`wss://.../ws`), since the
+persistent relay and SQLite store do not run inside Vercel serverless
+functions.
 
 ## Security boundaries
 

@@ -14,13 +14,26 @@ import {
 import {
   createPublicClient,
   bytesToHex,
+  defineChain,
   encodeFunctionData,
   http,
   parseAbi,
   parseUnits,
-  stringToHex,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import {
+  connect as connectWallet,
+  createConfig,
+  disconnect as disconnectWallet,
+  getConnectors,
+  sendTransaction,
+  signMessage,
+  signTypedData as wagmiSignTypedData,
+  switchChain,
+  watchAccount,
+  watchConnectors,
+  type Connector,
+} from "@wagmi/core";
 
 interface AppConfig {
   chainId: number;
@@ -30,10 +43,6 @@ interface AppConfig {
   relayUrl: string;
   manager: Address;
   token: Address;
-}
-
-interface EthereumProvider {
-  request(args: { method: string; params?: unknown[] | object }): Promise<unknown>;
 }
 
 interface ChannelIntent {
@@ -69,12 +78,28 @@ const managerAbi = [
   { type: "function", name: "joinChannel", stateMutability: "nonpayable", inputs: [{ name: "intent", type: "tuple", components: intentTypes.ChannelIntent }, { name: "signatureB", type: "bytes" }], outputs: [] },
 ] as const;
 
+export async function initializeProduct(): Promise<() => void> {
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
-const provider = (window as Window & { ethereum?: EthereumProvider }).ethereum;
 const config = (await fetch("/api/config").then((response) => response.json())) as AppConfig;
+const moderato = defineChain({
+  id: config.chainId,
+  name: config.chainName,
+  nativeCurrency: { name: "USD", symbol: "USD", decimals: 18 },
+  rpcUrls: { default: { http: [config.rpcUrl] } },
+  blockExplorers: { default: { name: "Tempo Explorer", url: config.explorerUrl } },
+  testnet: true,
+});
+const walletConfig = createConfig({
+  chains: [moderato],
+  transports: { [moderato.id]: http(config.rpcUrl) },
+  multiInjectedProviderDiscovery: true,
+});
 const publicClient = createPublicClient({ transport: http(config.rpcUrl) });
 const domain = { name: "Tempo.ChannelManager", version: "1", chainId: config.chainId, verifyingContract: config.manager } as const;
 let address: Address | undefined;
+let activeConnector: Connector | undefined;
+let changingConnector = false;
+let resettingWallet = false;
 let relay: OfflaneClient | undefined;
 let channels: ChannelSummary[] = [];
 const agents: Array<{ address: Address; channelId: string; limit: string; client: OfflaneClient; messaging: MessagingKeyPair }> = [];
@@ -101,30 +126,30 @@ function same(left: string, right: string): boolean {
 }
 
 async function switchToModerato(): Promise<void> {
-  if (!provider) throw new Error("Install a Tempo-compatible browser wallet first.");
-  try {
-    await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: `0x${config.chainId.toString(16)}` }] });
-  } catch {
-    await provider.request({
-      method: "wallet_addEthereumChain",
-      params: [{ chainId: `0x${config.chainId.toString(16)}`, chainName: config.chainName, nativeCurrency: { name: "USD", symbol: "USD", decimals: 18 }, rpcUrls: [config.rpcUrl], blockExplorerUrls: [config.explorerUrl] }],
-    });
-  }
+  if (!activeConnector) throw new Error("Connect a wallet first.");
+  await switchChain(walletConfig, { chainId: moderato.id, connector: activeConnector });
 }
 
-async function connect(): Promise<void> {
-  if (!provider) throw new Error("No browser wallet found. Install a Tempo-compatible wallet.");
-  await switchToModerato();
-  const accounts = (await provider.request({ method: "eth_requestAccounts" })) as Address[];
+async function connect(connector: Connector): Promise<void> {
+  if (activeConnector) {
+    changingConnector = true;
+    try {
+      await disconnectWallet(walletConfig, { connector: activeConnector });
+    } finally {
+      changingConnector = false;
+    }
+  }
+  const { accounts } = await connectWallet(walletConfig, { connector, chainId: moderato.id });
   if (!accounts[0]) throw new Error("Wallet did not return an account.");
   address = accounts[0];
+  activeConnector = connector;
+  await switchToModerato();
   relay?.close().catch(() => undefined);
   relay = new OfflaneClient(new WebSocketTransport(config.relayUrl));
   await relay.connect();
   await relay.authenticate({
     address,
-    signMessage: async (message) =>
-      (await provider.request({ method: "personal_sign", params: [stringToHex(message), address] })) as Hex,
+    signMessage: (message) => signMessage(walletConfig, { message, account: address!, connector }),
   });
   $("connectGate").hidden = true;
   $("product").hidden = false;
@@ -134,6 +159,37 @@ async function connect(): Promise<void> {
   $("addressLine").textContent = `Authenticated as ${address}`;
   log(`Wallet ${short(address)} authenticated with the relay.`);
   await refreshChannels();
+  ($("walletDialog") as HTMLDialogElement).close();
+}
+
+function renderWalletOptions(): void {
+  const options = getConnectors(walletConfig);
+  $("walletOptions").innerHTML = options.length
+    ? options.map((connector) => `<button class="wallet-option" data-connector="${connector.uid}">${connector.icon ? `<img class="wallet-icon wallet-image" src="${connector.icon}" alt=""/>` : `<span class="wallet-icon">${connector.name.slice(0, 1).toUpperCase()}</span>`}<span><b>${connector.name}</b><small>${connector.type === "injected" ? "Browser wallet" : connector.type}</small></span></button>`).join("")
+    : `<div class="wallet-empty">No browser wallet was detected.<br/>Install a Tempo-compatible wallet, then reload this page.</div>`;
+}
+
+function openWalletModal(): void {
+  renderWalletOptions();
+  ($("walletDialog") as HTMLDialogElement).showModal();
+}
+
+async function disconnectForAccountChange(): Promise<void> {
+  if (resettingWallet) return;
+  resettingWallet = true;
+  await relay?.close().catch(() => undefined);
+  await disconnectWallet(walletConfig).catch(() => undefined);
+  relay = undefined;
+  address = undefined;
+  activeConnector = undefined;
+  channels = [];
+  $("product").hidden = true;
+  $("connectGate").hidden = false;
+  $("relayState").textContent = "● Relay offline";
+  $("relayState").classList.remove("online");
+  $("walletButton").textContent = "Connect wallet";
+  toast("Wallet account changed. Connect the selected account to authenticate it.");
+  resettingWallet = false;
 }
 
 async function refreshChannels(): Promise<void> {
@@ -192,16 +248,26 @@ function renderActivity(): void {
 }
 
 async function signTypedData(types: object, primaryType: string, message: object): Promise<Hex> {
-  if (!provider || !address) throw new Error("Connect your wallet first.");
-  const payload = JSON.stringify({ domain, types: { ...types, EIP712Domain: [
-    { name: "name", type: "string" }, { name: "version", type: "string" }, { name: "chainId", type: "uint256" }, { name: "verifyingContract", type: "address" },
-  ] }, primaryType, message }, (_, value) => typeof value === "bigint" ? value.toString() : value);
-  return (await provider.request({ method: "eth_signTypedData_v4", params: [address, payload] })) as Hex;
+  if (!activeConnector || !address) throw new Error("Connect your wallet first.");
+  return wagmiSignTypedData(walletConfig, {
+    account: address,
+    connector: activeConnector,
+    domain,
+    types: types as Record<string, readonly { name: string; type: string }[]>,
+    primaryType,
+    message: message as Record<string, unknown>,
+  });
 }
 
 async function sendContract(to: Address, data: Hex): Promise<Hex> {
-  if (!provider || !address) throw new Error("Connect your wallet first.");
-  const hash = (await provider.request({ method: "eth_sendTransaction", params: [{ from: address, to, data }] })) as Hex;
+  if (!activeConnector || !address) throw new Error("Connect your wallet first.");
+  const hash = await sendTransaction(walletConfig, {
+    account: address,
+    connector: activeConnector,
+    chainId: moderato.id,
+    to,
+    data,
+  });
   await publicClient.waitForTransactionReceipt({ hash });
   return hash;
 }
@@ -298,10 +364,37 @@ function showView(name: string): void {
   $("crumb").textContent = name.toUpperCase();
 }
 
+const closeButtons = [...document.querySelectorAll<HTMLButtonElement>("dialog .dialog-head > button")];
+const closeDialog = (event: Event) => {
+  event.preventDefault();
+  const dialog = (event.currentTarget as HTMLButtonElement).closest<HTMLDialogElement>("dialog");
+  dialog?.close();
+};
+for (const button of closeButtons) {
+  button.type = "button";
+  button.addEventListener("click", closeDialog);
+}
+
 document.querySelectorAll<HTMLElement>("[data-view]").forEach((element) => element.addEventListener("click", () => showView(element.dataset.view!)));
 document.querySelectorAll<HTMLElement>("[data-open]").forEach((element) => element.addEventListener("click", () => ($(element.dataset.open + "Dialog") as HTMLDialogElement).showModal()));
-$("walletButton").addEventListener("click", () => connect().catch((error) => toast(String(error.message ?? error), true)));
-$("gateConnect").addEventListener("click", () => connect().catch((error) => toast(String(error.message ?? error), true)));
+const unwatchConnectors = watchConnectors(walletConfig, { onChange: () => {
+  if (($("walletDialog") as HTMLDialogElement).open) renderWalletOptions();
+} });
+const unwatchAccount = watchAccount(walletConfig, { onChange: (account, previous) => {
+  if (!changingConnector && previous.address && account.address !== previous.address) void disconnectForAccountChange();
+} });
+$("walletButton").addEventListener("click", openWalletModal);
+$("gateConnect").addEventListener("click", openWalletModal);
+$("walletOptions").addEventListener("click", (event) => {
+  const option = (event.target as HTMLElement).closest<HTMLElement>("[data-connector]");
+  const selected = getConnectors(walletConfig).find((connector) => connector.uid === option?.dataset.connector);
+  if (!option || !selected) return;
+  option.querySelector("small")!.textContent = "Waiting for wallet…";
+  void connect(selected).catch((error) => {
+    renderWalletOptions();
+    toast(String((error as Error).message ?? error), true);
+  });
+});
 $("refreshChannels").addEventListener("click", () => refreshChannels().catch((error) => toast(String(error.message ?? error), true)));
 $("createForm").addEventListener("submit", (event) => openChannel(event as SubmitEvent).catch((error) => toast(String(error.message ?? error), true)));
 $("joinForm").addEventListener("submit", (event) => joinChannel(event as SubmitEvent).catch((error) => toast(String(error.message ?? error), true)));
@@ -318,4 +411,13 @@ $("detailAgent").addEventListener("click", () => {
   ($("agentDialog") as HTMLDialogElement).showModal();
 });
 renderChannels(); renderAgents(); renderActivity();
-window.addEventListener("beforeunload", () => { relay?.close(); for (const agent of agents) agent.client.close(); });
+const closeClients = () => { relay?.close(); for (const agent of agents) agent.client.close(); };
+window.addEventListener("beforeunload", closeClients);
+return () => {
+  unwatchConnectors();
+  unwatchAccount();
+  for (const button of closeButtons) button.removeEventListener("click", closeDialog);
+  window.removeEventListener("beforeunload", closeClients);
+  closeClients();
+};
+}

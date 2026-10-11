@@ -5,19 +5,26 @@
   "type": "module",
   "scripts": {
     "prebuild": "pnpm --filter @offlane/sdk build",
-    "build": "tsc -p tsconfig.json && vite build",
+    "build": "next build",
+    "dev": "next dev --hostname 127.0.0.1 --port 4173",
     "pretypecheck": "pnpm --filter @offlane/sdk build",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "start": "node --env-file=../../.env dist/server.js"
+    "typecheck": "tsc --noEmit",
+    "start": "next start --hostname 127.0.0.1 --port 4173"
   },
   "dependencies": {
+    "@next/env": "16.4.0",
     "@offlane/protocol": "workspace:*",
     "@offlane/sdk": "workspace:*",
+    "@wagmi/core": "^3.6.5",
+    "next": "^16.4.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "viem": "^2.38.5"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
-    "typescript": "^5.9.3",
-    "vite": "^7.1.7"
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^5.9.3"
   }
 }
