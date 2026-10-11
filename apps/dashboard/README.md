@@ -51,6 +51,19 @@ The local `/demo` route can start the CLI demo and stream its output. Its test
 private keys stay in the Node process and are never returned by an API route.
 The process-spawning demo is disabled on Vercel.
 
+## Export agent credentials
+
+Open **Agent keys**, choose an open channel, set the maximum net spend, and
+authorize the generated delegate with the connected wallet. The dashboard
+then displays and downloads an `offlane-agent-*.json` file containing the
+delegated signer, signed channel capability, wallet-certified messaging key,
+and Moderato connection details an external agent needs.
+
+This MVP export is plaintext and intended only for disposable Tempo Moderato
+credentials. It never includes the connected wallet's private key. The
+generated agent remains available for another export only while the current
+tab stays open.
+
 ## Vercel deployment
 
 Create a Vercel project for `apps/dashboard` and enable access to files outside

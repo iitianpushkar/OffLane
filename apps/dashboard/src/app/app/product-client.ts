@@ -121,7 +121,56 @@ let pendingProposal: StateProposalMessage | undefined;
 let channelMessages: EncryptedMessageRecord[] = [];
 let messagingIdentity: MessagingKeyPair | undefined;
 const resolvedMessagingKeys = new Map<string, RegisteredMessagingKey>();
-const agents: Array<{ address: Address; channelId: string; limit: string; client: OfflaneClient; messaging: MessagingKeyPair }> = [];
+interface AgentCredentialExport {
+  format: "offlane-agent-credentials";
+  version: 1;
+  createdAt: string;
+  network: {
+    name: string;
+    chainId: number;
+    rpcUrl: string;
+    relayUrl: string;
+    channelManager: Address;
+  };
+  identity: {
+    owner: Address;
+    delegatedSigner: Address;
+    delegatedPrivateKey: Hex;
+  };
+  channel: {
+    channelId: Bytes32;
+    counterparty: Address;
+    token: Address;
+    participantRole: "A" | "B";
+  };
+  authorization: {
+    capability: {
+      protocolVersion: number;
+      channelId: Bytes32;
+      participant: Address;
+      delegatedSigner: Address;
+      counterparty: Address;
+      token: Address;
+      baselineBalance: string;
+      maxNetSpend: string;
+      capabilityNonce: string;
+    };
+    capabilitySignature: Hex;
+  };
+  messaging: StoredMessagingIdentity;
+  warning: string;
+}
+
+interface AuthorizedAgent {
+  address: Address;
+  channelId: string;
+  limit: string;
+  client: OfflaneClient;
+  credentials: AgentCredentialExport;
+}
+
+const agents: AuthorizedAgent[] = [];
+let selectedAgentExport: AuthorizedAgent | undefined;
 const activity: Array<{ time: Date; message: string }> = [];
 
 function toast(message: string, error = false): void {
@@ -177,6 +226,14 @@ function decodeStoredCertificate(stored: StoredMessagingIdentity): MessagingKeyC
     validFrom: BigInt(stored.certificate.validFrom),
     validUntil: BigInt(stored.certificate.validUntil),
   };
+}
+
+function storedMessagingIdentity(): StoredMessagingIdentity {
+  const raw = localStorage.getItem(messagingIdentityStorageKey());
+  if (!raw) throw new Error("Create and register the wallet messaging identity first.");
+  const stored = JSON.parse(raw) as StoredMessagingIdentity;
+  decodeStoredCertificate(stored);
+  return stored;
 }
 
 async function ensureMessagingIdentity(): Promise<void> {
@@ -548,7 +605,32 @@ function renderChannels(): void {
 
 function renderAgents(): void {
   $("agentCount").textContent = String(agents.length);
-  $("agentCards").innerHTML = agents.length ? agents.map((agent) => `<article class="card"><div class="top"><span class="pill">authorized</span><code>${short(agent.channelId)}</code></div><h3>${short(agent.address)}</h3><p>Ephemeral delegated signer</p><div class="balances"><div><b>${agent.limit}</b><small>PathUSD spend cap</small></div><div><b>Tab</b><small>Key lifetime</small></div></div></article>`).join("") : `<p class="empty">No agent keys in this tab. Authorize one for an open channel.</p>`;
+  $("agentCards").innerHTML = agents.length ? agents.map((agent, index) => `<article class="card"><div class="top"><span class="pill">authorized</span><code>${short(agent.channelId)}</code></div><h3>${short(agent.address)}</h3><p>Delegated payment signer + wallet-certified messaging identity</p><div class="balances"><div><b>${agent.limit}</b><small>PathUSD spend cap</small></div><div><b>JSON</b><small>Agent compatible</small></div></div><button type="button" class="secondary agent-export" data-agent-export="${index}">Export credentials</button></article>`).join("") : `<p class="empty">No agent keys in this tab. Authorize one for an open channel.</p>`;
+}
+
+function agentCredentialsJson(agent: AuthorizedAgent): string {
+  return JSON.stringify(agent.credentials, null, 2);
+}
+
+function showAgentExport(agent: AuthorizedAgent): void {
+  selectedAgentExport = agent;
+  ($("agentExportOutput") as HTMLTextAreaElement).value = agentCredentialsJson(agent);
+  const dialog = $("agentExportDialog") as HTMLDialogElement;
+  if (!dialog.open) dialog.showModal();
+}
+
+function downloadAgentCredentials(agent: AuthorizedAgent): void {
+  const blob = new Blob([agentCredentialsJson(agent)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `offlane-agent-${agent.address.slice(2, 10)}.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  log(`Exported credentials for agent ${short(agent.address)}.`);
+  toast("Agent credentials downloaded. Keep the file private.");
 }
 
 function renderActivity(): void {
@@ -639,12 +721,12 @@ async function joinChannel(event: SubmitEvent): Promise<void> {
 async function authorizeAgent(event: SubmitEvent): Promise<void> {
   event.preventDefault();
   if (!address) return;
+  if (!messagingIdentity) throw new Error("The wallet messaging identity is not ready.");
   const channelId = ($("agentChannel") as HTMLSelectElement).value;
   const channel = channels.find((item) => item.current.channelId === channelId);
   if (!channel) throw new Error("Select an open channel first.");
   const key = generatePrivateKey();
   const agent = privateKeyToAccount(key);
-  const messaging = generateMessagingKeyPair();
   const participantIsA = same(address, channel.participantA);
   const baselineBalance = participantIsA ? channel.current.balanceA : channel.current.balanceB;
   const maxNetSpend = parseUnits(($("agentLimit") as HTMLInputElement).value, 6);
@@ -659,11 +741,47 @@ async function authorizeAgent(event: SubmitEvent): Promise<void> {
   await client.connect();
   await client.authenticate({ address: agent.address, signMessage: (message) => agent.signMessage({ message }) });
   await client.registerCapability(capability, signature);
-  agents.push({ address: agent.address, channelId, limit: ($("agentLimit") as HTMLInputElement).value, client, messaging });
+  const credentials: AgentCredentialExport = {
+    format: "offlane-agent-credentials",
+    version: 1,
+    createdAt: new Date().toISOString(),
+    network: {
+      name: config.chainName,
+      chainId: config.chainId,
+      rpcUrl: config.rpcUrl,
+      relayUrl: config.relayUrl,
+      channelManager: config.manager,
+    },
+    identity: {
+      owner: address,
+      delegatedSigner: agent.address,
+      delegatedPrivateKey: key,
+    },
+    channel: {
+      channelId: channel.current.channelId,
+      counterparty: participantIsA ? channel.participantB : channel.participantA,
+      token: channel.token,
+      participantRole: participantIsA ? "A" : "B",
+    },
+    authorization: {
+      capability: {
+        ...capability,
+        baselineBalance: capability.baselineBalance.toString(),
+        maxNetSpend: capability.maxNetSpend.toString(),
+        capabilityNonce: capability.capabilityNonce.toString(),
+      },
+      capabilitySignature: signature,
+    },
+    messaging: storedMessagingIdentity(),
+    warning: "Plaintext credentials for Tempo Moderato testnet. Contains delegated and messaging private keys. Never share publicly or use with mainnet funds.",
+  };
+  const authorized = { address: agent.address, channelId, limit: ($("agentLimit") as HTMLInputElement).value, client, credentials } satisfies AuthorizedAgent;
+  agents.push(authorized);
   renderAgents();
   log(`Agent ${short(agent.address)} authorized for channel ${short(channelId)}.`);
   ($("agentDialog") as HTMLDialogElement).close();
-  toast("Agent key authorized and authenticated.");
+  showAgentExport(authorized);
+  toast("Agent authorized. Export its credentials now.");
 }
 
 function showView(name: string): void {
@@ -707,6 +825,21 @@ $("refreshChannels").addEventListener("click", () => refreshChannels().catch((er
 $("createForm").addEventListener("submit", (event) => openChannel(event as SubmitEvent).catch((error) => toast(String(error.message ?? error), true)));
 $("joinForm").addEventListener("submit", (event) => joinChannel(event as SubmitEvent).catch((error) => toast(String(error.message ?? error), true)));
 $("agentForm").addEventListener("submit", (event) => authorizeAgent(event as SubmitEvent).catch((error) => toast(String(error.message ?? error), true)));
+$("agentCards").addEventListener("click", (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLElement>("[data-agent-export]");
+  if (!button) return;
+  const agent = agents[Number(button.dataset.agentExport)];
+  if (agent) showAgentExport(agent);
+});
+$("copyAgentCredentials").addEventListener("click", () => {
+  if (!selectedAgentExport) return;
+  void navigator.clipboard.writeText(agentCredentialsJson(selectedAgentExport))
+    .then(() => toast("Agent credentials copied. Keep them private."))
+    .catch((error) => toast(String((error as Error).message ?? error), true));
+});
+$("downloadAgentCredentials").addEventListener("click", () => {
+  if (selectedAgentExport) downloadAgentCredentials(selectedAgentExport);
+});
 $("sendPaymentForm").addEventListener("submit", (event) => proposePayment(event as SubmitEvent).catch((error) => toast(String((error as Error).message ?? error), true)));
 $("refreshPeerKey").addEventListener("click", () => {
   if (!activeChannelId || !address) return;
