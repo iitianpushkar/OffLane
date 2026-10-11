@@ -25,6 +25,13 @@ Open `http://127.0.0.1:4173`. Next.js reads the repository-root `.env` during
 local development. Wallet signatures and transactions still require explicit
 approval. The interface is fixed to Tempo Moderato chain ID `42431`.
 
+The Channels view filters the relay-indexed list by **All**, **Open**, or
+**Pending**. Activity is stored per connected wallet in browser local storage
+and records confirmed channel transactions, relay-observed state nonce
+changes, payment proposals and decisions, encrypted-message events, and agent
+authorization or export actions. This keeps the audit trail visible after a
+page refresh while leaving private keys out of the log.
+
 ## Encrypted payment flow
 
 Use two browser profiles so each participant can connect a different wallet:

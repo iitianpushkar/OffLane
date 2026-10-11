@@ -94,6 +94,7 @@ packages/protocol/  Canonical types, schemas, hashing, and state validation
 packages/sdk/       Transport-independent client and WebSocket adapter
 services/relay/     Authenticated relay, SQLite store, and chain indexer
 apps/agent-demo/    Executable Alice, Bob, and delegated-agent demo
+apps/a2a-demo/      Exported-credential agent-to-agent payment simulation
 apps/dashboard/     Homepage, wallet product, and optional visual proof
 docs/               Nitrolite mapping and operational runbook
 ```
@@ -233,6 +234,32 @@ The Next.js app is deployable to Vercel. Its `OFFLANE_BROWSER_RELAY_URL` must
 point to a separately hosted TLS WebSocket relay (`wss://.../ws`), since the
 persistent relay and SQLite store do not run inside Vercel serverless
 functions.
+
+## Run the exported-credential A2A flow
+
+Connect both channel participants in separate browser profiles. Each one opens
+**Agent keys**, authorizes an agent for the same open channel, and downloads
+the resulting JSON credentials. Keep the existing relay running, then pass the
+two files to the simulator:
+
+```bash
+pnpm build
+pnpm a2a -- ~/Downloads/offlane-agent-alice.json ~/Downloads/offlane-agent-bob.json
+```
+
+The script verifies both wallet-signed capabilities and messaging
+certificates, authenticates the delegated signers, sends an encrypted task
+request with an A→B payment, and sends an encrypted response with a B→A
+payment. The default amounts are `0.10` and `0.05` PathUSD. Optional final
+arguments override them:
+
+```bash
+pnpm a2a -- alice.json bob.json 0.25 0.10
+```
+
+The simulator changes only the relay's off-chain state. It rejects credentials
+for any chain other than Tempo Moderato and does not submit an on-chain
+transaction.
 
 ## Security boundaries
 

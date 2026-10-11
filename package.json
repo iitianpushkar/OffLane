@@ -3,6 +3,7 @@
   "private": true,
   "packageManager": "pnpm@10.23.0",
   "scripts": {
+    "a2a": "pnpm --filter @offlane/a2a-demo start",
     "build": "pnpm --recursive build",
     "dashboard": "pnpm --filter @offlane/dashboard dev",
     "test": "pnpm --recursive test",

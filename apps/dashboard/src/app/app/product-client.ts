@@ -116,6 +116,8 @@ let resettingWallet = false;
 let relay: OfflaneClient | undefined;
 let unsubscribeRelayEvents: (() => void) | undefined;
 let channels: ChannelSummary[] = [];
+let channelsInitialized = false;
+let channelFilter: "all" | "open" | "pending" = "all";
 let activeChannelId: string | undefined;
 let pendingProposal: StateProposalMessage | undefined;
 let channelMessages: EncryptedMessageRecord[] = [];
@@ -171,7 +173,14 @@ interface AuthorizedAgent {
 
 const agents: AuthorizedAgent[] = [];
 let selectedAgentExport: AuthorizedAgent | undefined;
-const activity: Array<{ time: Date; message: string }> = [];
+type ActivityKind = "wallet" | "relay" | "channel" | "payment" | "message" | "agent";
+interface ActivityEntry {
+  id: string;
+  time: string;
+  kind: ActivityKind;
+  message: string;
+}
+const activity: ActivityEntry[] = [];
 
 function toast(message: string, error = false): void {
   const element = $("toast");
@@ -180,8 +189,38 @@ function toast(message: string, error = false): void {
   setTimeout(() => (element.className = ""), 3_500);
 }
 
-function log(message: string): void {
-  activity.unshift({ time: new Date(), message });
+function activityStorageKey(): string | undefined {
+  return address ? `offlane:activity:${config.chainId}:${address.toLowerCase()}` : undefined;
+}
+
+function loadActivity(): void {
+  activity.splice(0);
+  const key = activityStorageKey();
+  if (!key) return renderActivity();
+  try {
+    const stored = JSON.parse(localStorage.getItem(key) ?? "[]") as ActivityEntry[];
+    activity.push(...stored.filter((entry) =>
+      typeof entry.id === "string" &&
+      typeof entry.time === "string" &&
+      typeof entry.message === "string" &&
+      ["wallet", "relay", "channel", "payment", "message", "agent"].includes(entry.kind),
+    ).slice(0, 100));
+  } catch {
+    localStorage.removeItem(key);
+  }
+  renderActivity();
+}
+
+function log(message: string, kind: ActivityKind = "relay"): void {
+  activity.unshift({
+    id: `${Date.now()}-${crypto.randomUUID()}`,
+    time: new Date().toISOString(),
+    kind,
+    message,
+  });
+  activity.splice(100);
+  const key = activityStorageKey();
+  if (key) localStorage.setItem(key, JSON.stringify(activity));
   renderActivity();
 }
 
@@ -294,7 +333,7 @@ async function ensureMessagingIdentity(): Promise<void> {
     },
     signature,
   } satisfies StoredMessagingIdentity));
-  log(`Registered wallet-bound messaging key ${short(keyPair.publicKey)}.`);
+  log(`Registered wallet-bound messaging key ${short(keyPair.publicKey)}.`, "message");
 }
 
 async function resolveMessagingKey(owner: Address): Promise<RegisteredMessagingKey | undefined> {
@@ -327,6 +366,7 @@ async function connect(connector: Connector): Promise<void> {
   if (!accounts[0]) throw new Error("Wallet did not return an account.");
   address = accounts[0];
   activeConnector = connector;
+  loadActivity();
   $("connectGate").hidden = true;
   $("product").hidden = false;
   $("walletButton").textContent = short(address);
@@ -334,7 +374,7 @@ async function connect(connector: Connector): Promise<void> {
   $("relayState").textContent = "● Authenticating relay…";
   $("relayState").classList.remove("online");
   ($("walletDialog") as HTMLDialogElement).close();
-  log(`Wallet ${short(address)} connected. Waiting for relay authentication.`);
+  log(`Wallet ${short(address)} connected. Waiting for relay authentication.`, "wallet");
 
   relay?.close().catch(() => undefined);
   relay = new OfflaneClient(new WebSocketTransport(config.relayUrl));
@@ -354,13 +394,13 @@ async function connect(connector: Connector): Promise<void> {
     relay = undefined;
     $("relayState").textContent = "● Connection setup failed";
     $("addressLine").textContent = `Wallet connected as ${address}. Reconnect to retry wallet setup.`;
-    log(`Wallet setup failed for ${short(address)}.`);
+    log(`Wallet setup failed for ${short(address)}.`, "wallet");
     throw error;
   }
   $("relayState").textContent = "● Relay connected";
   $("relayState").classList.add("online");
   $("addressLine").textContent = `Authenticated as ${address}`;
-  log(`Wallet ${short(address)} authenticated with the relay.`);
+  log(`Wallet ${short(address)} authenticated with the relay.`, "wallet");
   await refreshChannels();
 }
 
@@ -387,6 +427,9 @@ async function disconnectForAccountChange(): Promise<void> {
   messagingIdentity = undefined;
   resolvedMessagingKeys.clear();
   channels = [];
+  channelsInitialized = false;
+  activity.splice(0);
+  renderActivity();
   $("product").hidden = true;
   $("connectGate").hidden = false;
   $("relayState").textContent = "● Relay offline";
@@ -398,9 +441,26 @@ async function disconnectForAccountChange(): Promise<void> {
 
 async function refreshChannels(): Promise<void> {
   if (!relay) return;
-  channels = await relay.listChannels();
+  const previous = new Map(channels.map((channel) => [channel.current.channelId.toLowerCase(), channel]));
+  const nextChannels = await relay.listChannels();
+  if (channelsInitialized) {
+    for (const channel of nextChannels) {
+      const before = previous.get(channel.current.channelId.toLowerCase());
+      if (!before) {
+        log(`Relay discovered channel ${short(channel.current.channelId)} with status ${channel.status}.`, "channel");
+        continue;
+      }
+      if (before.status !== channel.status) {
+        log(`Channel ${short(channel.current.channelId)} changed from ${before.status} to ${channel.status}.`, "channel");
+      }
+      if (channel.current.nonce > before.current.nonce) {
+        log(`Channel ${short(channel.current.channelId)} committed payment state nonce ${channel.current.nonce}.`, "payment");
+      }
+    }
+  }
+  channels = nextChannels;
+  channelsInitialized = true;
   renderChannels();
-  log(`Loaded ${channels.length} participant channel${channels.length === 1 ? "" : "s"}.`);
 }
 
 function channelCard(channel: ChannelSummary): string {
@@ -499,7 +559,7 @@ async function refreshChannelTraffic(): Promise<void> {
 function handleRelayEvent(message: { method: string; payload: Record<string, unknown> }): void {
   if (message.method === "channels.v1.state_proposed") {
     pendingProposal = stateProposalWireSchema.parse(message.payload);
-    log(`Received payment proposal ${short(pendingProposal.proposalId)} from ${short(pendingProposal.proposer)}.`);
+    log(`Received payment proposal ${short(pendingProposal.proposalId)} from ${short(pendingProposal.proposer)}.`, "payment");
     toast("A counterparty payment proposal is ready for review.");
     if (activeChannelId && same(pendingProposal.state.channelId, activeChannelId)) {
       void refreshChannelTraffic().catch(() => renderChannelTraffic());
@@ -507,7 +567,7 @@ function handleRelayEvent(message: { method: string; payload: Record<string, unk
   }
   if (message.method === "channels.v1.state_rejected") {
     pendingProposal = undefined;
-    log("The counterparty rejected the pending payment proposal.");
+    log("The counterparty rejected the pending payment proposal.", "payment");
     toast("Payment proposal rejected by the counterparty.", true);
     renderChannelTraffic();
   }
@@ -518,8 +578,13 @@ function handleRelayEvent(message: { method: string; payload: Record<string, unk
       openChannelWorkspace(activeChannelId);
     }).catch(() => undefined);
   }
-  if (message.method === "messages.v1.received" && activeChannelId) {
-    void refreshChannelTraffic().catch(() => undefined);
+  if (message.method === "messages.v1.received") {
+    const envelope = message.payload.envelope as { channelId?: unknown } | undefined;
+    const receivedChannel = typeof envelope?.channelId === "string" ? envelope.channelId : activeChannelId;
+    log(receivedChannel ? `Received an encrypted message for channel ${short(receivedChannel)}.` : "Received an encrypted channel message.", "message");
+    if (activeChannelId && receivedChannel && same(activeChannelId, receivedChannel)) {
+      void refreshChannelTraffic().catch(() => undefined);
+    }
   }
 }
 
@@ -564,7 +629,7 @@ async function proposePayment(event: SubmitEvent): Promise<void> {
   const proposalId = bytesToHex(crypto.getRandomValues(new Uint8Array(32))) as Bytes32;
   await relay.sendMessage(envelope);
   await relay.proposeState({ proposalId, proposer: address, baseStateHash: hashChannelState(domain, channel.current), state, authorization });
-  log(`Proposed ${Number(amount) / 1e6} PathUSD to ${short(recipient)} at nonce ${nextNonce}.`);
+  log(`Proposed ${Number(amount) / 1e6} PathUSD to ${short(recipient)} at nonce ${nextNonce}.`, "payment");
   ($("paymentMessage") as HTMLTextAreaElement).value = "";
   toast("Encrypted message sent. Waiting for the counterparty to accept the payment.");
 }
@@ -577,6 +642,7 @@ async function acceptPendingPayment(): Promise<void> {
   const matching = channelMessages.find((record) => same(record.envelope.messageId, proposal.state.appDataHash));
   if (matching) await relay.acknowledgeMessage(proposal.state.channelId, matching.envelope.messageId);
   pendingProposal = undefined;
+  log(`Accepted payment proposal ${short(proposal.proposalId)} at nonce ${proposal.state.nonce}.`, "payment");
   toast("Payment accepted and the channel state was updated.");
   await refreshChannels();
   openChannelWorkspace(proposal.state.channelId);
@@ -584,15 +650,25 @@ async function acceptPendingPayment(): Promise<void> {
 
 async function rejectPendingPayment(): Promise<void> {
   if (!relay || !pendingProposal) return;
-  await relay.rejectState(pendingProposal.proposalId, pendingProposal.state.channelId, "Rejected by counterparty");
+  const rejected = pendingProposal;
+  await relay.rejectState(rejected.proposalId, rejected.state.channelId, "Rejected by counterparty");
   pendingProposal = undefined;
+  log(`Rejected payment proposal ${short(rejected.proposalId)}.`, "payment");
   renderChannelTraffic();
   toast("Payment proposal rejected.");
 }
 
 function renderChannels(): void {
-  const cards = channels.length ? channels.map(channelCard).join("") : `<p class="empty">No channels yet. Open one or import a counterparty invite.</p>`;
+  const visibleChannels = channelFilter === "all"
+    ? channels
+    : channels.filter((channel) => channel.status === channelFilter);
+  const cards = visibleChannels.length
+    ? visibleChannels.map(channelCard).join("")
+    : `<p class="empty">No ${channelFilter === "all" ? "" : `${channelFilter} `}channels found.</p>`;
   $("allChannels").innerHTML = cards;
+  document.querySelectorAll<HTMLElement>("[data-channel-filter]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.channelFilter === channelFilter);
+  });
   $("recentChannels").innerHTML = channels.length
     ? channels.slice(0, 4).map((channel) => `<div class="channel-row"><div><code>${short(channel.current.channelId)}</code><small>${short(same(address!, channel.participantA) ? channel.participantB : channel.participantA)}</small></div><span class="pill">${channel.status}</span><div>${Number(channel.current.balanceA + channel.current.balanceB)/1e6}<small>PathUSD locked</small></div><div>nonce ${channel.current.nonce}</div></div>`).join("")
     : `<p class="empty">Your confirmed channels will appear here.</p>`;
@@ -629,12 +705,14 @@ function downloadAgentCredentials(agent: AuthorizedAgent): void {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
-  log(`Exported credentials for agent ${short(agent.address)}.`);
+  log(`Exported credentials for agent ${short(agent.address)}.`, "agent");
   toast("Agent credentials downloaded. Keep the file private.");
 }
 
 function renderActivity(): void {
-  $("activityList").innerHTML = activity.length ? activity.map((event) => `<div class="event"><time>${event.time.toLocaleTimeString()}</time><span>${event.message}</span></div>`).join("") : `<p class="empty">No session activity yet.</p>`;
+  $("activityList").innerHTML = activity.length
+    ? activity.map((event) => `<div class="event"><time>${new Date(event.time).toLocaleString()}</time><b>${event.kind}</b><span>${escapeHtml(event.message)}</span></div>`).join("")
+    : `<p class="empty">No recorded activity for this wallet yet.</p>`;
 }
 
 async function signTypedData(types: object, primaryType: string, message: object): Promise<Hex> {
@@ -681,11 +759,11 @@ async function openChannel(event: SubmitEvent): Promise<void> {
     toast("Approve PathUSD in your wallet.");
     const approve = encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [config.manager, intent.depositA] });
     const approveTx = await sendContract(config.token, approve);
-    log(`PathUSD approval confirmed: ${short(approveTx)}.`);
+    log(`PathUSD approval confirmed: ${short(approveTx)}.`, "channel");
     toast("Submit the channel open transaction.");
     const open = encodeFunctionData({ abi: managerAbi, functionName: "openChannel", args: [intent, signature] });
     const openTx = await sendContract(config.manager, open);
-    log(`Channel ${short(channelId)} opened: ${short(openTx)}.`);
+    log(`Channel ${short(channelId)} opened: ${short(openTx)}.`, "channel");
     const invitation = `offlane://invite/${btoa(JSON.stringify(intent, (_, value) => typeof value === "bigint" ? value.toString() : value))}`;
     ($("inviteOutput") as HTMLTextAreaElement).value = invitation;
     ($("createDialog") as HTMLDialogElement).close();
@@ -712,7 +790,7 @@ async function joinChannel(event: SubmitEvent): Promise<void> {
   await sendContract(config.token, encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [config.manager, intent.depositB] }));
   toast("Submit the join transaction.");
   const hash = await sendContract(config.manager, encodeFunctionData({ abi: managerAbi, functionName: "joinChannel", args: [intent, signature] }));
-  log(`Joined a channel in transaction ${short(hash)}.`);
+  log(`Joined a channel in transaction ${short(hash)}.`, "channel");
   ($("joinDialog") as HTMLDialogElement).close();
   toast("Channel joined successfully.");
   setTimeout(() => refreshChannels().catch(() => undefined), 2_500);
@@ -778,7 +856,7 @@ async function authorizeAgent(event: SubmitEvent): Promise<void> {
   const authorized = { address: agent.address, channelId, limit: ($("agentLimit") as HTMLInputElement).value, client, credentials } satisfies AuthorizedAgent;
   agents.push(authorized);
   renderAgents();
-  log(`Agent ${short(agent.address)} authorized for channel ${short(channelId)}.`);
+  log(`Agent ${short(agent.address)} authorized for channel ${short(channelId)}.`, "agent");
   ($("agentDialog") as HTMLDialogElement).close();
   showAgentExport(authorized);
   toast("Agent authorized. Export its credentials now.");
@@ -822,6 +900,15 @@ $("walletOptions").addEventListener("click", (event) => {
   });
 });
 $("refreshChannels").addEventListener("click", () => refreshChannels().catch((error) => toast(String(error.message ?? error), true)));
+document.querySelectorAll<HTMLElement>("[data-channel-filter]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const filter = button.dataset.channelFilter;
+    if (filter === "all" || filter === "open" || filter === "pending") {
+      channelFilter = filter;
+      renderChannels();
+    }
+  });
+});
 $("createForm").addEventListener("submit", (event) => openChannel(event as SubmitEvent).catch((error) => toast(String(error.message ?? error), true)));
 $("joinForm").addEventListener("submit", (event) => joinChannel(event as SubmitEvent).catch((error) => toast(String(error.message ?? error), true)));
 $("agentForm").addEventListener("submit", (event) => authorizeAgent(event as SubmitEvent).catch((error) => toast(String(error.message ?? error), true)));
