@@ -1,112 +1,179 @@
+<div align="center">
+
 # OffLane
 
-OffLane is a bidirectional off-chain payment network for Tempo, designed for
-autonomous AI agents and an encrypted messaging layer. Two participants lock
-TIP-20 collateral in `ChannelManager`, exchange signed balance states through
-a relay, and settle the latest mutually authorized state on-chain.
+### Private communication and instant bidirectional payments for AI agents on Tempo
 
-The architecture uses Layer-3's
-[Nitrolite](https://github.com/layer-3/nitrolite) as a source-level reference
-for compact RPC frames, transport separation, request correlation, relay
-routing, persistence, and confirmed event replay. OffLane keeps a direct
-two-party balance model and Tempo-specific settlement and capability rules.
-See [the reference map](docs/NITROLITE_REFERENCE.md) for the exact comparison.
+[![Network](https://img.shields.io/badge/Tempo-Moderato-6C5CE7?style=for-the-badge)](https://explore.tempo.xyz/)
+[![Status](https://img.shields.io/badge/status-hackathon_MVP-22C55E?style=for-the-badge)](#what-is-working)
+[![TypeScript](https://img.shields.io/badge/TypeScript-SDK_%2B_Relay-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](packages/sdk/)
+[![Solidity](https://img.shields.io/badge/Solidity-ChannelManager-363636?style=for-the-badge&logo=solidity&logoColor=white)](contracts/)
+[![Next.js](https://img.shields.io/badge/Next.js-Dashboard-000000?style=for-the-badge&logo=next.js&logoColor=white)](apps/dashboard/)
 
-## How it works
+**Open a collateralized channel once. Exchange encrypted work and signed
+payments off-chain. Settle only the final balance on Tempo.**
+
+[Launch locally](#quick-start) · [Run the A2A flow](#exported-credential-a2a-demo) · [Read the runbook](docs/RUNBOOK.md) · [Nitrolite reference](docs/NITROLITE_REFERENCE.md)
+
+</div>
+
+---
+
+OffLane is a two-party state-channel network built for people and autonomous
+agents. Participants lock PathUSD in a Tempo `ChannelManager`, exchange
+encrypted messages and mutually authorized balance updates through an
+authenticated relay, and retain the newest signed state as settlement
+evidence.
+
+The result is a private agent-to-agent payment rail with fast updates in both
+directions, bounded delegated authority, durable recovery, and no on-chain
+transaction for every interaction.
+
+## The fundamental idea
 
 ```mermaid
 flowchart LR
-    A[Participant or agent A] <-->|Signed states and ciphertext| R[OffLane relay]
-    R <-->|Signed states and ciphertext| B[Participant or agent B]
-    R -->|Channels, ciphertext and event cursor| DB[(SQLite)]
-    CM[Tempo ChannelManager] -->|Open, join, close and settlement events| R
-    A -->|Deposit or settle| CM
-    B -->|Deposit or settle| CM
+    subgraph LEFT[Participant A]
+        WA[Root wallet A]
+        AA[Person or delegated agent A]
+    end
+
+    subgraph OFFCHAIN[Off-chain coordination]
+        R{{OffLane relay}}
+        DB[(SQLite<br/>states · proposals · ciphertext)]
+    end
+
+    subgraph RIGHT[Participant B]
+        WB[Root wallet B]
+        AB[Person or delegated agent B]
+    end
+
+    subgraph TEMPO[Tempo Moderato]
+        CM[[ChannelManager]]
+        USD[(PathUSD collateral)]
+    end
+
+    WA -->|deposit once| CM
+    WB -->|deposit once| CM
+    AA <-->|encrypted messages<br/>signed balance states| R
+    R <-->|encrypted messages<br/>signed balance states| AB
+    R -->|persist and recover| DB
+    CM <-->|lock · release collateral| USD
+    CM -->|confirmed lifecycle events| R
+    AA -. latest agreed state .-> CM
+    AB -. latest agreed state .-> CM
+
+    classDef wallet fill:#153E2E,stroke:#63F5A6,color:#F0FFF7,stroke-width:2px;
+    classDef endpoint fill:#241A45,stroke:#B59BFF,color:#F8F5FF,stroke-width:2px;
+    classDef relay fill:#073B4C,stroke:#4DDBFF,color:#F0FCFF,stroke-width:3px;
+    classDef store fill:#4A1942,stroke:#FF83E6,color:#FFF3FC,stroke-width:2px;
+    classDef chain fill:#4B3510,stroke:#FFD166,color:#FFF8E7,stroke-width:2px;
+    class WA,WB wallet;
+    class AA,AB endpoint;
+    class R relay;
+    class DB store;
+    class CM,USD chain;
+    style LEFT fill:#0B1712,stroke:#2D7D59,color:#E9FFF3
+    style RIGHT fill:#0B1712,stroke:#2D7D59,color:#E9FFF3
+    style OFFCHAIN fill:#081A22,stroke:#197A96,color:#E9FAFF
+    style TEMPO fill:#201A0B,stroke:#9C7624,color:#FFF7DB
 ```
 
-Payments are cumulative balance updates. Either participant can pay over the
-same channel:
+Payments are cumulative balance updates over one shared channel:
 
-```text
-A pays B: balanceA decreases, balanceB increases
-B pays A: balanceB decreases, balanceA increases
+| Direction | Balance change |
+| --- | --- |
+| **A pays B** | `balanceA ↓` and `balanceB ↑` |
+| **B pays A** | `balanceB ↓` and `balanceA ↑` |
+
+Every accepted payment advances the nonce by exactly one and preserves total
+collateral. Both participants authorize the same EIP-712 `ChannelState`.
+Encrypted message commitments can be placed in `appDataHash`, binding a payment
+to the message that caused it.
+
+## Agent-based flow
+
+The dashboard can create a channel-scoped delegated signer, obtain the wallet's
+capability signature, and export everything an external agent needs. The root
+wallet private key never enters the export.
+
+```mermaid
+flowchart TB
+    subgraph ONBOARDING[One-time authorization]
+        DA[Dashboard A] -->|generate delegate<br/>set spending cap| CA[/Agent A credentials/]
+        WA[Wallet A] -->|sign capability| CA
+        DB[Dashboard B] -->|generate delegate<br/>set spending cap| CB[/Agent B credentials/]
+        WB[Wallet B] -->|sign capability| CB
+    end
+
+    subgraph AUTONOMOUS[Agent-to-agent execution]
+        CA --> AGENTA[Agent A]
+        CB --> AGENTB[Agent B]
+        AGENTA -->|1 · encrypted task request| RELAY{{OffLane relay}}
+        RELAY -->|2 · deliver request| AGENTB
+        AGENTA -->|3 · propose A → B payment| RELAY
+        AGENTB -->|4 · verify and accept| RELAY
+        AGENTB -->|5 · encrypted result| RELAY
+        RELAY -->|6 · deliver result| AGENTA
+        AGENTB -->|7 · propose B → A payment| RELAY
+        AGENTA -->|8 · verify and accept| RELAY
+    end
+
+    RELAY --> STATE[(Latest mutually<br/>authorized state)]
+    STATE -. settle only when needed .-> CHAIN[[Tempo ChannelManager]]
+
+    classDef dashboard fill:#143C32,stroke:#66F2B1,color:#F1FFF8,stroke-width:2px;
+    classDef wallet fill:#49320A,stroke:#FFD166,color:#FFF8E6,stroke-width:2px;
+    classDef credential fill:#3C174C,stroke:#F18BFF,color:#FFF3FF,stroke-width:2px;
+    classDef agent fill:#251A52,stroke:#A99BFF,color:#F6F3FF,stroke-width:3px;
+    classDef relay fill:#063C4B,stroke:#4DDCFF,color:#EDFCFF,stroke-width:3px;
+    classDef state fill:#4B2216,stroke:#FF9566,color:#FFF3ED,stroke-width:2px;
+    classDef chain fill:#153E2E,stroke:#63F5A6,color:#F0FFF7,stroke-width:2px;
+    class DA,DB dashboard;
+    class WA,WB wallet;
+    class CA,CB credential;
+    class AGENTA,AGENTB agent;
+    class RELAY relay;
+    class STATE state;
+    class CHAIN chain;
+    style ONBOARDING fill:#111B17,stroke:#37795C,color:#EDFFF5
+    style AUTONOMOUS fill:#111329,stroke:#6257B8,color:#F4F2FF
 ```
 
-Every accepted update advances the nonce by one and preserves total
-collateral. Both participants sign the same EIP-712 `ChannelState`.
+Each exported agent credential contains:
 
-## AI-agent authorization
+- A delegated secp256k1 payment signer and its private key
+- A wallet-signed, channel-specific `ChannelCapability`
+- The wallet-certified X25519 messaging identity
+- Channel, token, relay, RPC, and contract configuration
+- The maximum net spend selected by the wallet owner
 
-A participant can authorize an automated key with a root-signed
-`ChannelCapability`. The capability binds the agent to:
+The credential file never contains the root wallet private key. The current
+MVP export is plaintext and restricted to disposable Tempo Moderato test
+credentials.
 
-- One channel
-- One participant and counterparty
-- One TIP-20 token
-- A delegated signer
-- A baseline balance and maximum net spend
-- A capability nonce
+## What is working
 
-The agent signs individual states, while the participant signs the capability.
-The contract independently verifies both signatures and enforces the spending
-floor. Alice and Bob can each use their own agent in the same bidirectional
-channel.
+| Layer | Implemented behavior |
+| --- | --- |
+| **Tempo contract** | Open, join, cooperative close, unilateral close, challenge, settlement, replay protection, direct signatures, and delegated capability signatures |
+| **Payments** | Cumulative state updates in both directions, conserved collateral, strict nonce progression, spending-floor enforcement, and deterministic proposal collision handling |
+| **Private messaging** | X25519 key agreement, HKDF-SHA256 derivation, XChaCha20-Poly1305 encryption, acknowledgements, and ciphertext commitments in channel state |
+| **Identity** | Signed relay challenges and wallet-signed messaging-key certificates with discovery, versioning, expiry, revocation, and recovery |
+| **Relay** | Compact versioned RPC frames, WebSocket routing, durable pending proposals, confirmed chain-event replay, and SQLite persistence |
+| **Web product** | Next.js homepage, wallet connection, channel creation and joining, manual encrypted payments, agent authorization, credential export, channel filters, and persistent activity |
+| **Agent demos** | Full lifecycle Moderato demo plus a two-credential A2A request/response simulation with payments in both directions |
 
-Capabilities deliberately remain valid as settlement evidence after an agent
-is stopped. Closing the channel permanently retires that channel-scoped
-authority.
+## Quick start
 
-## Implemented
-
-- Tempo `ChannelManager` contract with open, join, cooperative close,
-  unilateral close, challenge, and settlement paths
-- Permanent channel-intent replay protection
-- Bidirectional cumulative balance states
-- Direct participant and channel-scoped agent authorizations
-- Capability maximum-net-spend enforcement
-- Compact versioned RPC frames based on Nitrolite's five-field format
-- TypeScript protocol and relay SDK
-- Signed relay challenge authentication
-- Agent capability registration for inbound event routing
-- Proposal, acceptance, rejection, collision resolution, and state queries
-- Durable pending-proposal recovery for participants that reconnect later
-- WebSocket relay with strict runtime schemas and request correlation
-- X25519 key agreement, HKDF-SHA256 key derivation, and authenticated
-  XChaCha20-Poly1305 message encryption in the SDK
-- Opaque encrypted-envelope routing with inbox listing, delivery state, and
-  recipient acknowledgements
-- Wallet-signed X25519 messaging-key certificates with automatic
-  counterparty discovery, versioning, expiry, revocation, and SQLite recovery
-- Canonical ciphertext commitments bound to `ChannelState.appDataHash`
-- SQLite persistence for channels, proposals, authorizations, encrypted
-  messages, acknowledgements, and indexer cursor
-- Confirmed `ChannelManager` event replay from the deployment block
-- Lifecycle gating for pending, open, closing, cancelled, and settled channels
-- Runnable Moderato agent demo with bidirectional encrypted request/response
-  messaging, payments, relay restart recovery, and capability-aware on-chain
-  settlement
-
-## Repository layout
-
-```text
-contracts/          Foundry project and ChannelManager
-packages/protocol/  Canonical types, schemas, hashing, and state validation
-packages/sdk/       Transport-independent client and WebSocket adapter
-services/relay/     Authenticated relay, SQLite store, and chain indexer
-apps/agent-demo/    Executable Alice, Bob, and delegated-agent demo
-apps/a2a-demo/      Exported-credential agent-to-agent payment simulation
-apps/dashboard/     Homepage, wallet product, and optional visual proof
-docs/               Nitrolite mapping and operational runbook
-```
-
-## Prerequisites
+### Requirements
 
 - Node.js 22.5 or newer
 - pnpm 10.23
-- Foundry with Tempo support
-- A Tempo Moderato RPC URL for live deployment
+- Foundry with Tempo support for contract development
+- A Tempo Moderato RPC endpoint
 
-## Install and test
+### 1. Install and verify
 
 ```bash
 git submodule update --init --recursive
@@ -114,195 +181,214 @@ pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm test
 pnpm build
+```
 
+Contract checks live separately:
+
+```bash
 cd contracts
 forge build
 forge test
 ```
 
-The tests cover direct and delegated signatures, capability limits,
-bidirectional A→B then B→A payments, encryption and tamper rejection,
-ciphertext-to-state binding, delivery acknowledgement, full `uint64` message
-sequences, SQLite restart recovery, confirmed event replay, request freshness,
-and a real WebSocket RPC connection.
-
-## Run the relay
-
-The current capability-enabled `ChannelManager` is deployed on Tempo Moderato
-at [`0xCa234b7cF576A4dd65bF28C6405d91eEA1f57789`](https://explore.tempo.xyz/address/0xCa234b7cF576A4dd65bF28C6405d91eEA1f57789),
-starting at block `38381392`. Deployment details are recorded in
-[contracts/README.md](contracts/README.md).
-
-From the repository root:
+### 2. Configure Moderato
 
 ```bash
 cp .env.example .env
 ```
 
-The template contains the current contract address and deployment block. Set
-the RPC URL:
+Set the RPC URL in `.env`:
 
 ```dotenv
 OFFLANE_RPC_URL=YOUR_MODERATO_RPC_URL
 ```
 
-`ALICE_PK` and `BOB_PK` are optional and must only contain disposable
-Moderato test keys. The local `.env` is ignored by Git.
+The template already contains the current contract address and deployment
+block. `ALICE_PK` and `BOB_PK` are optional and must only contain disposable
+Moderato test keys. `.env` is ignored by Git.
 
-Then build and start the relay:
+### 3. Start the relay
 
 ```bash
-pnpm build
-
 pnpm --filter @offlane/relay start
 ```
 
-The start script requires and reads the root `.env` automatically. The relay
-replays confirmed contract events before it opens the server.
-
-```text
-WebSocket RPC: ws://127.0.0.1:7824/ws
-Health check:  http://127.0.0.1:7824/health
-```
+| Endpoint | Local address |
+| --- | --- |
+| WebSocket RPC | `ws://127.0.0.1:7824/ws` |
+| Health check | `http://127.0.0.1:7824/health` |
 
 ```bash
 curl http://127.0.0.1:7824/health
 ```
 
-Channels, pending proposals, mutually signed states, and the indexer cursor
-survive restarts in SQLite. The complete deployment, startup, and live smoke
-test instructions are in [docs/RUNBOOK.md](docs/RUNBOOK.md).
+The relay replays confirmed contract events before opening the server.
+Channels, signed states, pending proposals, encrypted messages,
+acknowledgements, registered keys, and the indexer cursor survive restarts.
 
-## Run the bidirectional agent demo
+### 4. Start the web product
 
-With disposable funded `ALICE_PK` and `BOB_PK` values in `.env`:
-
-```bash
-pnpm build
-pnpm --filter @offlane/agent-demo start
-```
-
-The demo manages an isolated relay and temporary SQLite database. It opens a
-10/10 PathUSD channel and authorizes an ephemeral Alice agent with a 3 PathUSD
-spending cap. The agent encrypts a JSON request for Bob and pays 2 PathUSD;
-Bob decrypts it, acknowledges it, encrypts a response, and pays 1 PathUSD
-back. Each encrypted envelope hash is the corresponding state's
-`appDataHash`. The demo restarts the relay, decrypts both recovered messages,
-checks their acknowledgements and nonce 2, then settles the final 9/11 PathUSD
-state on-chain. It aborts unless the RPC reports Moderato chain ID `42431`. If
-a relay step fails after join, it cooperatively settles the newest mutually
-signed state before returning the error so test collateral is not left locked.
-
-## Run the web product
-
-The Next.js web package contains a public homepage and a wallet-authenticated
-product workspace. From the app, a user can authenticate with the relay, list
-indexed channels, open a channel, exchange an invitation with a counterparty,
-join a pending channel, and generate and authorize a channel-scoped agent key
-with a hard spending limit. An open channel workspace also supports encrypted
-messages tied to signed balance proposals, counterparty review, acceptance or
-rejection, and payments in either direction.
-
-The earlier execution dashboard remains available under `/demo` as an
-optional technical proof. Test keys used by that proof remain in the local
-Node process and are never returned to browser code.
-
-Build the workspace, then run the persistent relay and Next.js frontend in
-separate terminals:
-
-```bash
-pnpm build
-pnpm --filter @offlane/relay start
-```
+In a second terminal:
 
 ```bash
 pnpm dashboard
 ```
 
-Open `http://127.0.0.1:4173`. The product only configures Tempo Moderato chain
-ID `42431`; every signature and transaction still requires wallet approval.
-To test a private payment, connect each participant once from separate browser
-profiles. Each wallet signs a messaging-key certificate, and the relay then
-resolves the counterparty's encryption key automatically from the wallet
-address already stored in the channel. Either participant can enter a message
-and amount and select **Sign and propose payment**. The recipient can open or
-refresh the channel later, decrypt the message, and accept or reject the
-stored proposal. An accepted proposal advances the nonce and updates both
-balances without an on-chain transaction.
+Open [http://127.0.0.1:4173](http://127.0.0.1:4173). Use two browser profiles
+to connect two wallets. One participant creates and shares a channel invite;
+the other imports it and joins. Once the indexed channel is open, either side
+can send an encrypted message with a PathUSD payment proposal.
 
-The Next.js app is deployable to Vercel. Its `OFFLANE_BROWSER_RELAY_URL` must
-point to a separately hosted TLS WebSocket relay (`wss://.../ws`), since the
-persistent relay and SQLite store do not run inside Vercel serverless
-functions.
+## Exported-credential A2A demo
 
-## Run the exported-credential A2A flow
+From each participant's browser profile:
 
-Connect both channel participants in separate browser profiles. Each one opens
-**Agent keys**, authorizes an agent for the same open channel, and downloads
-the resulting JSON credentials. Keep the existing relay running, then pass the
-two files to the simulator:
+1. Open **Agent keys**.
+2. Select the same open channel.
+3. Choose a maximum net spend.
+4. Approve the capability signature.
+5. Download the generated agent credential JSON.
+
+Keep the relay running and pass both files to the simulator:
 
 ```bash
 pnpm build
-pnpm a2a -- ~/Downloads/offlane-agent-alice.json ~/Downloads/offlane-agent-bob.json
+pnpm a2a -- \
+  ~/Downloads/offlane-agent-alice.json \
+  ~/Downloads/offlane-agent-bob.json
 ```
 
-The script verifies both wallet-signed capabilities and messaging
-certificates, authenticates the delegated signers, sends an encrypted task
-request with an A→B payment, and sends an encrypted response with a B→A
-payment. The default amounts are `0.10` and `0.05` PathUSD. Optional final
-arguments override them:
+The defaults transfer `0.10` PathUSD from A to B and `0.05` PathUSD from B to
+A. Override both amounts with final arguments:
 
 ```bash
 pnpm a2a -- alice.json bob.json 0.25 0.10
 ```
 
-The simulator changes only the relay's off-chain state. It rejects credentials
-for any chain other than Tempo Moderato and does not submit an on-chain
-transaction.
+The simulator verifies both wallet signatures, checks that the exports belong
+to opposite sides of the same channel, authenticates each delegate, exchanges
+encrypted request/response payloads, and commits two mutually authorized
+off-chain states. It rejects non-Moderato credentials and never submits an
+on-chain transaction.
+
+> The current A2A task and result are scripted to demonstrate the transport,
+> encryption, authorization, and payment flow. An LLM is not making autonomous
+> decisions yet.
+
+## Full lifecycle agent demo
+
+With disposable funded `ALICE_PK` and `BOB_PK` values in `.env`:
+
+```bash
+pnpm --filter @offlane/agent-demo start
+```
+
+This demo creates a fresh 10/10 PathUSD channel, authorizes an Alice delegate,
+exchanges encrypted work and payments in both directions, restarts the relay,
+proves SQLite recovery, and cooperatively settles the latest 9/11 state on
+Tempo. If a later step fails, it attempts to settle the newest mutually signed
+state before exiting so test collateral is not left locked.
+
+## Deployed contract
+
+The capability-enabled `ChannelManager` is deployed on Tempo Moderato:
+
+| Field | Value |
+| --- | --- |
+| Address | [`0xCa234b7cF576A4dd65bF28C6405d91eEA1f57789`](https://explore.tempo.xyz/address/0xCa234b7cF576A4dd65bF28C6405d91eEA1f57789) |
+| Deployment block | `38381392` |
+| Chain ID | `42431` |
+| Collateral | PathUSD / TIP-20 |
+
+See [contracts/README.md](contracts/README.md) for deployment details and
+[docs/RUNBOOK.md](docs/RUNBOOK.md) for the complete operational procedure.
+
+## How delegated authority stays bounded
+
+A root wallet signs a `ChannelCapability` that binds the delegate to:
+
+- One channel
+- One participant and counterparty
+- One TIP-20 token
+- One delegated signer
+- One baseline balance and maximum net spend
+- One capability nonce
+
+The delegated key signs individual states. The participant signature proves
+the scope, while the delegate signature proves approval of the specific state.
+The contract independently verifies both and rejects balances below the
+capability's spending floor.
+
+Capabilities remain valid as settlement evidence after an agent process
+stops. Closing the channel permanently retires that channel-scoped authority.
+
+## Protocol model
+
+OffLane follows the compact five-field RPC envelope used as a source-level
+reference from [Layer-3 Nitrolite](https://github.com/layer-3/nitrolite):
+
+```text
+[messageType, requestId, method, payload, timestampMs]
+```
+
+Nitrolite informed the transport boundary, request correlation, relay routing,
+persistence, and event replay design. OffLane uses its own direct two-party
+balance model, Tempo settlement contract, delegated capability rules, and
+encrypted-message extension. The exact comparison is documented in
+[docs/NITROLITE_REFERENCE.md](docs/NITROLITE_REFERENCE.md).
 
 ## Security boundaries
 
-- The relay never holds participant root keys and never countersigns balances.
-- Messaging private keys and plaintext remain at the endpoints. The relay sees
-  routing headers, ciphertext, timing, sizes, and delivery state.
-- XChaCha20-Poly1305 authenticates the ciphertext and its channel, sender,
-  recipient, key, sequence, state nonce, and content-type headers.
-- A nonzero state `appDataHash` accepted by the relay must identify the stored
-  encrypted envelope for that nonce and proposer.
+- Root wallet private keys never enter the relay or exported agent files.
+- The relay stores opaque ciphertext and routing metadata; it cannot decrypt
+  message contents.
+- XChaCha20-Poly1305 authenticates ciphertext together with the channel,
+  participants, messaging keys, sequence, state nonce, and content type.
 - Every balance change requires valid participant or capability authorization.
-- The contract enforces nonce progression, conserved collateral, and agent
+- A nonzero `appDataHash` must identify a matching stored encrypted envelope.
+- The contract enforces nonce progression, conserved collateral, and delegated
   spending limits during settlement.
-- The relay rejects stale requests and states based on a non-current base.
-- Confirmed close or challenge events delete pending proposals and block new
-  off-chain updates.
-- Proposal and acceptance commits recheck channel status inside the SQLite
-  transaction to prevent close-event races.
-- The default relay verifier supports secp256k1 EOAs. The verifier interface is
-  ready for a Tempo TIP-1020 adapter supporting P256 and WebAuthn accounts.
+- Proposal acceptance rechecks channel state inside the SQLite transaction to
+  prevent close-event races.
+- The exported credential JSON contains delegated and messaging private keys.
+  Treat it like a scoped secret and use it only with disposable Moderato funds.
+- The relay currently verifies secp256k1 EOAs. Its verifier boundary can be
+  extended for Tempo TIP-1020 P256 and WebAuthn accounts.
+
+## Repository map
+
+```text
+contracts/          Tempo ChannelManager, deployment scripts, and Foundry tests
+packages/protocol/  Canonical types, schemas, hashing, and state validation
+packages/sdk/       Relay client, WebSocket transport, and endpoint encryption
+services/relay/     Authentication, routing, chain indexer, and SQLite storage
+apps/dashboard/     Next.js product and credential-export workflow
+apps/a2a-demo/      Two exported-credential A2A payment simulation
+apps/agent-demo/    Full channel lifecycle, restart, and settlement proof
+docs/               Operations and Nitrolite source mapping
+```
 
 ## Current limitations
 
-- The indexer uses a configurable confirmation depth; stored block-hash-based
-  deep-reorg reconciliation is still pending.
-- SQLite uses Node's `node:sqlite` API, which may print an experimental warning
-  on current Node releases.
-- The web product has signed key discovery, but multi-device encrypted key
-  backup and forward-secret ratcheting remain.
-- Relay acknowledgements are authenticated by the recipient's relay session;
-  they are not yet portable, independently signed delivery receipts.
-- Encrypted messages are retained while the indexed channel exists and are
-  deleted after confirmed settlement. Archival policy and large attachments
-  are outside the current scope.
-- The recorded deployment is a Moderato testnet deployment, not production.
+- The A2A simulator uses scripted task/result payloads rather than an LLM or
+  external tool runtime.
+- Agent credential exports are plaintext and browser-tab scoped in the MVP.
+- Payment capabilities have a spending bound but no independent expiry or
+  revocation transaction; closing the channel retires them.
+- Multi-device encrypted-key backup and forward-secret ratcheting are pending.
+- Signed, independently portable delivery receipts are pending.
+- Deep-reorg reconciliation by stored block hash is pending.
+- SQLite uses Node's `node:sqlite` API and may print an experimental warning.
+- The recorded deployment is a testnet deployment and is not production-ready.
 
 ## Next milestones
 
-1. Add signed delivery receipts and paid service request/result semantics.
-2. Add multi-device messaging keys, encrypted recovery, and forward-secret sessions.
-3. Add Tempo TIP-1020 verification for P256 and WebAuthn relay sessions.
-4. Add block-hash reorg reconciliation, metrics, rate limits, and deployment
-   packaging.
+1. Add capability expiry, rotation, and future-state revocation semantics.
+2. Define structured task, quote, progress, result, and receipt messages.
+3. Connect a model/tool adapter behind deterministic spending policies.
+4. Add signed delivery receipts and multi-device messaging recovery.
+5. Add TIP-1020 verification, metrics, rate limits, reorg reconciliation, and
+   production deployment packaging.
 
 ## Documentation
 
@@ -313,5 +399,6 @@ transaction.
 - [Protocol package](packages/protocol/README.md)
 - [SDK package](packages/sdk/README.md)
 - [Relay service](services/relay/README.md)
-- [Bidirectional agent demo](apps/agent-demo/README.md)
-- [Visual dashboard](apps/dashboard/README.md)
+- [Full lifecycle agent demo](apps/agent-demo/README.md)
+- [Exported-credential A2A demo](apps/a2a-demo/README.md)
+- [Next.js dashboard](apps/dashboard/README.md)
