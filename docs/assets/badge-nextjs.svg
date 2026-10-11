@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="157" height="30" role="img" aria-label="Next.js: Dashboard">
+  <title>Next.js: Dashboard</title>
+  <rect width="157" height="30" rx="6" fill="#111"/>
+  <rect x="76" width="81" height="30" rx="6" fill="#333"/>
+  <path d="M76 0h6v30h-6z" fill="#333"/>
+  <circle cx="17" cy="15" r="9" fill="#fff"/>
+  <text x="17" y="19" text-anchor="middle" fill="#111" font-family="Verdana,DejaVu Sans,sans-serif" font-size="9" font-weight="900">N</text>
+  <text x="51" y="19" text-anchor="middle" fill="#fff" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" font-weight="700">NEXT.JS</text>
+  <text x="117" y="19" text-anchor="middle" fill="#fff" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" font-weight="700">DASHBOARD</text>
+</svg>

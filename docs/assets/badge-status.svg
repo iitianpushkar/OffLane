@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="174" height="30" role="img" aria-label="Status: Hackathon MVP">
+  <title>Status: Hackathon MVP</title>
+  <rect width="174" height="30" rx="6" fill="#10241a"/>
+  <rect x="60" width="114" height="30" rx="6" fill="#22a95a"/>
+  <path d="M60 0h6v30h-6z" fill="#22a95a"/>
+  <circle cx="16" cy="15" r="5" fill="#73f5a5"/>
+  <text x="39" y="19" text-anchor="middle" fill="#eafff2" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" font-weight="700">STATUS</text>
+  <text x="117" y="19" text-anchor="middle" fill="#fff" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" font-weight="700">HACKATHON MVP</text>
+</svg>

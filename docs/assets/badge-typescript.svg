@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="181" height="30" role="img" aria-label="TypeScript: SDK and Relay">
+  <title>TypeScript: SDK and Relay</title>
+  <rect width="181" height="30" rx="6" fill="#174f78"/>
+  <rect x="99" width="82" height="30" rx="6" fill="#3178c6"/>
+  <path d="M99 0h6v30h-6z" fill="#3178c6"/>
+  <rect x="10" y="7" width="17" height="17" rx="2" fill="#fff"/>
+  <text x="18.5" y="20" text-anchor="middle" fill="#3178c6" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" font-weight="900">TS</text>
+  <text x="63" y="19" text-anchor="middle" fill="#fff" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" font-weight="700">TYPESCRIPT</text>
+  <text x="140" y="19" text-anchor="middle" fill="#fff" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" font-weight="700">SDK + RELAY</text>
+</svg>

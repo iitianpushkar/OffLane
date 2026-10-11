@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="196" height="30" role="img" aria-label="Solidity: ChannelManager">
+  <title>Solidity: ChannelManager</title>
+  <rect width="196" height="30" rx="6" fill="#292929"/>
+  <rect x="82" width="114" height="30" rx="6" fill="#555"/>
+  <path d="M82 0h6v30h-6z" fill="#555"/>
+  <path d="m17 5 5 8-5 3-5-3 5-8Zm0 12 5-3-5 11-5-11 5 3Z" fill="#eee"/>
+  <text x="52" y="19" text-anchor="middle" fill="#fff" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" font-weight="700">SOLIDITY</text>
+  <text x="139" y="19" text-anchor="middle" fill="#fff" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" font-weight="700">CHANNELMANAGER</text>
+</svg>

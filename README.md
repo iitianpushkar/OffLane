@@ -1,19 +1,19 @@
 <div align="center">
 
-# OffLane
+# ⚡ OffLane
 
 ### Private communication and instant bidirectional payments for AI agents on Tempo
 
-[![Network](https://img.shields.io/badge/Tempo-Moderato-6C5CE7?style=for-the-badge)](https://explore.tempo.xyz/)
-[![Status](https://img.shields.io/badge/status-hackathon_MVP-22C55E?style=for-the-badge)](#what-is-working)
-[![TypeScript](https://img.shields.io/badge/TypeScript-SDK_%2B_Relay-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](packages/sdk/)
-[![Solidity](https://img.shields.io/badge/Solidity-ChannelManager-363636?style=for-the-badge&logo=solidity&logoColor=white)](contracts/)
-[![Next.js](https://img.shields.io/badge/Next.js-Dashboard-000000?style=for-the-badge&logo=next.js&logoColor=white)](apps/dashboard/)
+[![Tempo Moderato](docs/assets/badge-tempo.svg)](https://explore.tempo.xyz/)
+[![Hackathon MVP](docs/assets/badge-status.svg)](#-what-is-working)
+[![TypeScript SDK and Relay](docs/assets/badge-typescript.svg)](packages/sdk/)
+[![Solidity ChannelManager](docs/assets/badge-solidity.svg)](contracts/)
+[![Next.js Dashboard](docs/assets/badge-nextjs.svg)](apps/dashboard/)
 
 **Open a collateralized channel once. Exchange encrypted work and signed
 payments off-chain. Settle only the final balance on Tempo.**
 
-[Launch locally](#quick-start) · [Run the A2A flow](#exported-credential-a2a-demo) · [Read the runbook](docs/RUNBOOK.md) · [Nitrolite reference](docs/NITROLITE_REFERENCE.md)
+[Launch locally](#-quick-start) · [Run the A2A flow](#-exported-credential-a2a-demo) · [Read the runbook](docs/RUNBOOK.md) · [Nitrolite reference](docs/NITROLITE_REFERENCE.md)
 
 </div>
 
@@ -29,7 +29,7 @@ The result is a private agent-to-agent payment rail with fast updates in both
 directions, bounded delegated authority, durable recovery, and no on-chain
 transaction for every interaction.
 
-## The fundamental idea
+## 💡 The fundamental idea
 
 ```mermaid
 flowchart LR
@@ -91,7 +91,7 @@ collateral. Both participants authorize the same EIP-712 `ChannelState`.
 Encrypted message commitments can be placed in `appDataHash`, binding a payment
 to the message that caused it.
 
-## Agent-based flow
+## 🤖 Agent-based flow
 
 The dashboard can create a channel-scoped delegated signer, obtain the wallet's
 capability signature, and export everything an external agent needs. The root
@@ -152,7 +152,7 @@ The credential file never contains the root wallet private key. The current
 MVP export is plaintext and restricted to disposable Tempo Moderato test
 credentials.
 
-## What is working
+## ✅ What is working
 
 | Layer | Implemented behavior |
 | --- | --- |
@@ -164,16 +164,16 @@ credentials.
 | **Web product** | Next.js homepage, wallet connection, channel creation and joining, manual encrypted payments, agent authorization, credential export, channel filters, and persistent activity |
 | **Agent demos** | Full lifecycle Moderato demo plus a two-credential A2A request/response simulation with payments in both directions |
 
-## Quick start
+## 🚀 Quick start
 
-### Requirements
+### 📋 Requirements
 
 - Node.js 22.5 or newer
 - pnpm 10.23
 - Foundry with Tempo support for contract development
 - A Tempo Moderato RPC endpoint
 
-### 1. Install and verify
+### 1. 📦 Install and verify
 
 ```bash
 git submodule update --init --recursive
@@ -191,7 +191,7 @@ forge build
 forge test
 ```
 
-### 2. Configure Moderato
+### 2. ⚙️ Configure Moderato
 
 ```bash
 cp .env.example .env
@@ -207,7 +207,7 @@ The template already contains the current contract address and deployment
 block. `ALICE_PK` and `BOB_PK` are optional and must only contain disposable
 Moderato test keys. `.env` is ignored by Git.
 
-### 3. Start the relay
+### 3. 📡 Start the relay
 
 ```bash
 pnpm --filter @offlane/relay start
@@ -226,7 +226,7 @@ The relay replays confirmed contract events before opening the server.
 Channels, signed states, pending proposals, encrypted messages,
 acknowledgements, registered keys, and the indexer cursor survive restarts.
 
-### 4. Start the web product
+### 4. 🖥️ Start the web product
 
 In a second terminal:
 
@@ -239,7 +239,7 @@ to connect two wallets. One participant creates and shares a channel invite;
 the other imports it and joins. Once the indexed channel is open, either side
 can send an encrypted message with a PathUSD payment proposal.
 
-## Exported-credential A2A demo
+## 🤝 Exported-credential A2A demo
 
 From each participant's browser profile:
 
@@ -275,7 +275,7 @@ on-chain transaction.
 > encryption, authorization, and payment flow. An LLM is not making autonomous
 > decisions yet.
 
-## Full lifecycle agent demo
+## 🔄 Full lifecycle agent demo
 
 With disposable funded `ALICE_PK` and `BOB_PK` values in `.env`:
 
@@ -289,7 +289,7 @@ proves SQLite recovery, and cooperatively settles the latest 9/11 state on
 Tempo. If a later step fails, it attempts to settle the newest mutually signed
 state before exiting so test collateral is not left locked.
 
-## Deployed contract
+## 📜 Deployed contract
 
 The capability-enabled `ChannelManager` is deployed on Tempo Moderato:
 
@@ -303,7 +303,7 @@ The capability-enabled `ChannelManager` is deployed on Tempo Moderato:
 See [contracts/README.md](contracts/README.md) for deployment details and
 [docs/RUNBOOK.md](docs/RUNBOOK.md) for the complete operational procedure.
 
-## How delegated authority stays bounded
+## 🛡️ How delegated authority stays bounded
 
 A root wallet signs a `ChannelCapability` that binds the delegate to:
 
@@ -322,7 +322,7 @@ capability's spending floor.
 Capabilities remain valid as settlement evidence after an agent process
 stops. Closing the channel permanently retires that channel-scoped authority.
 
-## Protocol model
+## 🧩 Protocol model
 
 OffLane follows the compact five-field RPC envelope used as a source-level
 reference from [Layer-3 Nitrolite](https://github.com/layer-3/nitrolite):
@@ -337,7 +337,7 @@ balance model, Tempo settlement contract, delegated capability rules, and
 encrypted-message extension. The exact comparison is documented in
 [docs/NITROLITE_REFERENCE.md](docs/NITROLITE_REFERENCE.md).
 
-## Security boundaries
+## 🔐 Security boundaries
 
 - Root wallet private keys never enter the relay or exported agent files.
 - The relay stores opaque ciphertext and routing metadata; it cannot decrypt
@@ -355,7 +355,7 @@ encrypted-message extension. The exact comparison is documented in
 - The relay currently verifies secp256k1 EOAs. Its verifier boundary can be
   extended for Tempo TIP-1020 P256 and WebAuthn accounts.
 
-## Repository map
+## 🗂️ Repository map
 
 ```text
 contracts/          Tempo ChannelManager, deployment scripts, and Foundry tests
@@ -368,29 +368,7 @@ apps/agent-demo/    Full channel lifecycle, restart, and settlement proof
 docs/               Operations and Nitrolite source mapping
 ```
 
-## Current limitations
-
-- The A2A simulator uses scripted task/result payloads rather than an LLM or
-  external tool runtime.
-- Agent credential exports are plaintext and browser-tab scoped in the MVP.
-- Payment capabilities have a spending bound but no independent expiry or
-  revocation transaction; closing the channel retires them.
-- Multi-device encrypted-key backup and forward-secret ratcheting are pending.
-- Signed, independently portable delivery receipts are pending.
-- Deep-reorg reconciliation by stored block hash is pending.
-- SQLite uses Node's `node:sqlite` API and may print an experimental warning.
-- The recorded deployment is a testnet deployment and is not production-ready.
-
-## Next milestones
-
-1. Add capability expiry, rotation, and future-state revocation semantics.
-2. Define structured task, quote, progress, result, and receipt messages.
-3. Connect a model/tool adapter behind deterministic spending policies.
-4. Add signed delivery receipts and multi-device messaging recovery.
-5. Add TIP-1020 verification, metrics, rate limits, reorg reconciliation, and
-   production deployment packaging.
-
-## Documentation
+## 📚 Documentation
 
 - [Manual deployment and runbook](docs/RUNBOOK.md)
 - [Nitrolite source mapping](docs/NITROLITE_REFERENCE.md)

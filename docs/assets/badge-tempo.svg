@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="154" height="30" role="img" aria-label="Tempo: Moderato">
+  <title>Tempo: Moderato</title>
+  <rect width="154" height="30" rx="6" fill="#251a52"/>
+  <rect x="62" width="92" height="30" rx="6" fill="#6c5ce7"/>
+  <path d="M62 0h6v30h-6z" fill="#6c5ce7"/>
+  <text x="31" y="19" text-anchor="middle" fill="#f8f7ff" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" font-weight="700">TEMPO</text>
+  <text x="108" y="19" text-anchor="middle" fill="#fff" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" font-weight="700">MODERATO</text>
+</svg>
