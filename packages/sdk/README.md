@@ -20,6 +20,9 @@ await client.proposeState({
   state,
   authorization,
 });
+
+// A recipient that reconnects can recover the durable proposal.
+const pending = await client.getPendingProposal(channelId);
 ```
 
 `proposeState` is direction-neutral. Participant A or participant B may be the
@@ -49,9 +52,19 @@ await client.sendMessage(envelope);
 
 const [record] = await bobClient.listMessages(channelId);
 const request = JSON.parse(decryptMessageText(record.envelope, bobMessaging));
-await bobClient.acknowledgeMessage(envelope.messageId);
+await bobClient.acknowledgeMessage(channelId, envelope.messageId);
 ```
 
-Applications must distribute and authenticate messaging public keys. The demo
-creates dedicated ephemeral keys for both endpoints and passes their public
-keys directly.
+Applications that do not use the relay directory must distribute and
+authenticate messaging public keys themselves. The demo creates dedicated
+ephemeral keys for both endpoints and passes their public keys directly.
+
+Browser products can remove that out-of-band step with the relay directory:
+
+```ts
+await client.registerMessagingKey(certificate, walletSignature);
+const peer = await client.resolveMessagingKey(counterpartyAddress);
+```
+
+The certificate is wallet-signed; the X25519 private key remains at the
+endpoint.

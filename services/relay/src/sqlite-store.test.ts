@@ -6,6 +6,7 @@ import type {
   Bytes32,
   ChannelState,
   EncryptedEnvelope,
+  MessagingKeyCertificate,
   StateAcceptanceMessage,
   StateProposalMessage,
 } from "@offlane/protocol";
@@ -68,6 +69,14 @@ describe("SqliteRelayStore", () => {
       messageId: `0x${"77".repeat(32)}` as Bytes32,
       sequence: 1n << 63n,
     };
+    const messagingCertificate: MessagingKeyCertificate = {
+      protocolVersion: 1,
+      owner: A,
+      publicKey: `0x${"88".repeat(32)}` as Bytes32,
+      keyVersion: 4n,
+      validFrom: 1_700_000_000n,
+      validUntil: 1_700_086_400n,
+    };
 
     try {
       let store = new SqliteRelayStore(path);
@@ -90,6 +99,11 @@ describe("SqliteRelayStore", () => {
         contractAddress: A,
         lastBlock: 99n,
       });
+      await store.saveMessagingKey({
+        certificate: messagingCertificate,
+        signature: "0x1234",
+        registeredAt: 127,
+      });
       store.close();
 
       store = new SqliteRelayStore(path);
@@ -109,6 +123,12 @@ describe("SqliteRelayStore", () => {
       expect(await store.listMessages(CHANNEL, B, 1n)).toEqual([
         { envelope: highSequenceEnvelope, status: "sent", sentAt: 123 },
       ]);
+      expect(await store.getMessagingKey(A)).toEqual({
+        certificate: messagingCertificate,
+        signature: "0x1234",
+        registeredAt: 127,
+      });
+      expect(await store.revokeMessagingKey(A, 4n, 128)).toBe(true);
       await store.markMessageDelivered(envelope.messageId, 125);
       await store.acknowledgeMessage(envelope.messageId, 126);
       const channel = await store.getChannel(CHANNEL);
@@ -129,6 +149,7 @@ describe("SqliteRelayStore", () => {
         deliveredAt: 125,
         acknowledgedAt: 126,
       });
+      expect(await store.getMessagingKey(A)).toMatchObject({ revokedAt: 128 });
       store.close();
     } finally {
       rmSync(directory, { recursive: true, force: true });

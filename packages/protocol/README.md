@@ -48,3 +48,8 @@ Wire schemas encode `bigint` fields as decimal strings. The versioned message
 RPC surface is `messages.v1.send`, `messages.v1.list`, and
 `messages.v1.acknowledge`, with `messages.v1.received` and
 `messages.v1.acknowledged` events.
+
+`MessagingKeyCertificate` binds an X25519 public key to a wallet address using
+an EIP-712 signature under the OffLane Messaging domain. Version and validity
+fields support replacement, expiry, and revocation without using the wallet's
+fund-controlling key for encryption.

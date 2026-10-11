@@ -3,6 +3,7 @@ import type {
   Bytes32,
   ChannelState,
   EncryptedMessageRecord,
+  RegisteredMessagingKey,
   StateAcceptanceMessage,
   StateAuthorization,
   StateProposalMessage,
@@ -29,6 +30,10 @@ export interface IndexerCursor {
 export interface PendingProposal {
   proposal: StateProposalMessage;
   createdAt: number;
+}
+
+export interface StoredMessagingKey extends RegisteredMessagingKey {
+  revokedAt?: number;
 }
 
 export interface RelayStore {
@@ -62,6 +67,9 @@ export interface RelayStore {
   ): Promise<EncryptedMessageRecord[]>;
   markMessageDelivered(messageId: Bytes32, deliveredAt: number): Promise<void>;
   acknowledgeMessage(messageId: Bytes32, acknowledgedAt: number): Promise<void>;
+  getMessagingKey(owner: Address): Promise<StoredMessagingKey | undefined>;
+  saveMessagingKey(registration: StoredMessagingKey): Promise<void>;
+  revokeMessagingKey(owner: Address, keyVersion: bigint, revokedAt: number): Promise<boolean>;
   close(): void;
 }
 
@@ -80,6 +88,7 @@ export class MemoryRelayStore implements RelayStore {
   private readonly proposalByChannel = new Map<string, string>();
   private readonly cursors = new Map<string, bigint>();
   private readonly messages = new Map<string, EncryptedMessageRecord>();
+  private readonly messagingKeys = new Map<string, StoredMessagingKey>();
 
   async getChannel(channelId: Bytes32): Promise<RelayChannel | undefined> {
     return this.channels.get(channelKey(channelId));
@@ -203,6 +212,25 @@ export class MemoryRelayStore implements RelayStore {
       deliveredAt: record.deliveredAt ?? acknowledgedAt,
       acknowledgedAt,
     });
+  }
+
+  async getMessagingKey(owner: Address): Promise<StoredMessagingKey | undefined> {
+    return this.messagingKeys.get(owner.toLowerCase());
+  }
+
+  async saveMessagingKey(registration: StoredMessagingKey): Promise<void> {
+    this.messagingKeys.set(registration.certificate.owner.toLowerCase(), registration);
+  }
+
+  async revokeMessagingKey(
+    owner: Address,
+    keyVersion: bigint,
+    revokedAt: number,
+  ): Promise<boolean> {
+    const current = this.messagingKeys.get(owner.toLowerCase());
+    if (!current || current.certificate.keyVersion !== keyVersion) return false;
+    this.messagingKeys.set(owner.toLowerCase(), { ...current, revokedAt });
+    return true;
   }
 
   close(): void {}

@@ -43,7 +43,11 @@ The initial method surface is:
 - `channels.v1.accept_state`
 - `channels.v1.reject_state`
 - `channels.v1.get_state`
+- `channels.v1.get_pending`
 - `channels.v1.list`
+- `keys.v1.register`
+- `keys.v1.resolve`
+- `keys.v1.revoke`
 - `channels.v1.state_updated`
 - `messages.v1.send`
 - `messages.v1.list`

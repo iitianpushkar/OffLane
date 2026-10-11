@@ -8,11 +8,16 @@ import {
   encodeChannelCapability,
   encodeChannelState,
   encodeEncryptedEnvelope,
+  encodeMessagingKeyCertificate,
   encodeRpcMessage,
   encodeStateAuthorization,
   rpcErrorPayloadSchema,
   RpcMessageType,
   messageListResponseWireSchema,
+  messagingKeyRegistrationWireSchema,
+  messagingKeyResolutionResponseWireSchema,
+  messagingKeyRevocationWireSchema,
+  pendingProposalResponseWireSchema,
   stateAcceptanceWireSchema,
   stateProposalWireSchema,
   type ProtocolMethod,
@@ -23,6 +28,8 @@ import {
   type EncryptedEnvelope,
   type EncryptedMessageRecord,
   type Hex,
+  type MessagingKeyCertificate,
+  type RegisteredMessagingKey,
   type RpcMessage,
   type RpcPayload,
   type StateAcceptanceMessage,
@@ -259,10 +266,52 @@ export class OfflaneClient {
     return this.call("channels.v1.get_state", { channelId }, options);
   }
 
+  async getPendingProposal(
+    channelId: Bytes32,
+    options?: RpcCallOptions,
+  ): Promise<StateProposalMessage | undefined> {
+    return pendingProposalResponseWireSchema.parse(
+      await this.call("channels.v1.get_pending", { channelId }, options),
+    ).proposal ?? undefined;
+  }
+
   async listChannels(options?: RpcCallOptions): Promise<ChannelSummary[]> {
     return channelListResponseWireSchema.parse(
       await this.call("channels.v1.list", {}, options),
     ).channels;
+  }
+
+  async registerMessagingKey(
+    certificate: MessagingKeyCertificate,
+    signature: Hex,
+    options?: RpcCallOptions,
+  ): Promise<void> {
+    const payload = {
+      certificate: encodeMessagingKeyCertificate(certificate),
+      signature,
+    };
+    messagingKeyRegistrationWireSchema.parse(payload);
+    await this.call("keys.v1.register", payload, options);
+  }
+
+  async resolveMessagingKey(
+    owner: Address,
+    options?: RpcCallOptions,
+  ): Promise<RegisteredMessagingKey | undefined> {
+    const response = messagingKeyResolutionResponseWireSchema.parse(
+      await this.call("keys.v1.resolve", { owner }, options),
+    );
+    return response.registration ?? undefined;
+  }
+
+  async revokeMessagingKey(
+    owner: Address,
+    keyVersion: bigint,
+    options?: RpcCallOptions,
+  ): Promise<void> {
+    const payload = { owner, keyVersion: keyVersion.toString() };
+    messagingKeyRevocationWireSchema.parse(payload);
+    await this.call("keys.v1.revoke", payload, options);
   }
 
   async sendMessage(

@@ -69,11 +69,14 @@ authority.
 - Signed relay challenge authentication
 - Agent capability registration for inbound event routing
 - Proposal, acceptance, rejection, collision resolution, and state queries
+- Durable pending-proposal recovery for participants that reconnect later
 - WebSocket relay with strict runtime schemas and request correlation
 - X25519 key agreement, HKDF-SHA256 key derivation, and authenticated
   XChaCha20-Poly1305 message encryption in the SDK
 - Opaque encrypted-envelope routing with inbox listing, delivery state, and
   recipient acknowledgements
+- Wallet-signed X25519 messaging-key certificates with automatic
+  counterparty discovery, versioning, expiry, revocation, and SQLite recovery
 - Canonical ciphertext commitments bound to `ChannelState.appDataHash`
 - SQLite persistence for channels, proposals, authorizations, encrypted
   messages, acknowledgements, and indexer cursor
@@ -195,7 +198,9 @@ The Next.js web package contains a public homepage and a wallet-authenticated
 product workspace. From the app, a user can authenticate with the relay, list
 indexed channels, open a channel, exchange an invitation with a counterparty,
 join a pending channel, and generate and authorize a channel-scoped agent key
-with a hard spending limit.
+with a hard spending limit. An open channel workspace also supports encrypted
+messages tied to signed balance proposals, counterparty review, acceptance or
+rejection, and payments in either direction.
 
 The earlier execution dashboard remains available under `/demo` as an
 optional technical proof. Test keys used by that proof remain in the local
@@ -215,6 +220,15 @@ pnpm dashboard
 
 Open `http://127.0.0.1:4173`. The product only configures Tempo Moderato chain
 ID `42431`; every signature and transaction still requires wallet approval.
+To test a private payment, connect each participant once from separate browser
+profiles. Each wallet signs a messaging-key certificate, and the relay then
+resolves the counterparty's encryption key automatically from the wallet
+address already stored in the channel. Either participant can enter a message
+and amount and select **Sign and propose payment**. The recipient can open or
+refresh the channel later, decrypt the message, and accept or reject the
+stored proposal. An accepted proposal advances the nonce and updates both
+balances without an on-chain transaction.
+
 The Next.js app is deployable to Vercel. Its `OFFLANE_BROWSER_RELAY_URL` must
 point to a separately hosted TLS WebSocket relay (`wss://.../ws`), since the
 persistent relay and SQLite store do not run inside Vercel serverless
@@ -246,8 +260,8 @@ functions.
   deep-reorg reconciliation is still pending.
 - SQLite uses Node's `node:sqlite` API, which may print an experimental warning
   on current Node releases.
-- The demo exchanges messaging public keys out of band. Production key
-  certificates, discovery, rotation, and forward-secret ratcheting remain.
+- The web product has signed key discovery, but multi-device encrypted key
+  backup and forward-secret ratcheting remain.
 - Relay acknowledgements are authenticated by the recipient's relay session;
   they are not yet portable, independently signed delivery receipts.
 - Encrypted messages are retained while the indexed channel exists and are
@@ -258,7 +272,7 @@ functions.
 ## Next milestones
 
 1. Add signed delivery receipts and paid service request/result semantics.
-2. Add messaging-key certificates, rotation, and forward-secret sessions.
+2. Add multi-device messaging keys, encrypted recovery, and forward-secret sessions.
 3. Add Tempo TIP-1020 verification for P256 and WebAuthn relay sessions.
 4. Add block-hash reorg reconciliation, metrics, rate limits, and deployment
    packaging.

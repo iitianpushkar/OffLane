@@ -1,11 +1,24 @@
 import {
   channelCapabilityTypes,
+  channelStateTypes,
+  hashChannelState,
+  messagingKeyCertificateTypes,
+  messagingKeyDomain,
+  stateProposalWireSchema,
   type Address,
+  type Bytes32,
   type ChannelCapability,
+  type ChannelState,
   type ChannelSummary,
+  type EncryptedMessageRecord,
   type Hex,
+  type MessagingKeyCertificate,
+  type RegisteredMessagingKey,
+  type StateProposalMessage,
 } from "@offlane/protocol";
 import {
+  decryptMessageText,
+  encryptMessage,
   generateMessagingKeyPair,
   OfflaneClient,
   WebSocketTransport,
@@ -19,6 +32,7 @@ import {
   http,
   parseAbi,
   parseUnits,
+  verifyTypedData,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import {
@@ -29,7 +43,6 @@ import {
   sendTransaction,
   signMessage,
   signTypedData as wagmiSignTypedData,
-  switchChain,
   watchAccount,
   watchConnectors,
   type Connector,
@@ -101,7 +114,13 @@ let activeConnector: Connector | undefined;
 let changingConnector = false;
 let resettingWallet = false;
 let relay: OfflaneClient | undefined;
+let unsubscribeRelayEvents: (() => void) | undefined;
 let channels: ChannelSummary[] = [];
+let activeChannelId: string | undefined;
+let pendingProposal: StateProposalMessage | undefined;
+let channelMessages: EncryptedMessageRecord[] = [];
+let messagingIdentity: MessagingKeyPair | undefined;
+const resolvedMessagingKeys = new Map<string, RegisteredMessagingKey>();
 const agents: Array<{ address: Address; channelId: string; limit: string; client: OfflaneClient; messaging: MessagingKeyPair }> = [];
 const activity: Array<{ time: Date; message: string }> = [];
 
@@ -125,9 +144,117 @@ function same(left: string, right: string): boolean {
   return left.toLowerCase() === right.toLowerCase();
 }
 
-async function switchToModerato(): Promise<void> {
-  if (!activeConnector) throw new Error("Connect a wallet first.");
-  await switchChain(walletConfig, { chainId: moderato.id, connector: activeConnector });
+interface StoredMessagingIdentity {
+  keyPair: MessagingKeyPair;
+  certificate: {
+    protocolVersion: 1;
+    owner: Address;
+    publicKey: Bytes32;
+    keyVersion: string;
+    validFrom: string;
+    validUntil: string;
+  };
+  signature: Hex;
+}
+
+function messagingIdentityStorageKey(): string {
+  return `offlane:messaging-identity:${config.chainId}:${address?.toLowerCase()}`;
+}
+
+function nextMessageSequence(channelId: string): bigint {
+  const key = `${messagingIdentityStorageKey()}:${channelId.toLowerCase()}:sequence`;
+  const previous = BigInt(localStorage.getItem(key) ?? "0");
+  const timestampFloor = BigInt(Date.now()) * 1_000n;
+  const next = previous >= timestampFloor ? previous + 1n : timestampFloor;
+  localStorage.setItem(key, next.toString());
+  return next;
+}
+
+function decodeStoredCertificate(stored: StoredMessagingIdentity): MessagingKeyCertificate {
+  return {
+    ...stored.certificate,
+    keyVersion: BigInt(stored.certificate.keyVersion),
+    validFrom: BigInt(stored.certificate.validFrom),
+    validUntil: BigInt(stored.certificate.validUntil),
+  };
+}
+
+async function ensureMessagingIdentity(): Promise<void> {
+  if (!relay || !address || !activeConnector) throw new Error("Authenticate the wallet first.");
+  const storageKey = messagingIdentityStorageKey();
+  const raw = localStorage.getItem(storageKey);
+  let stored: StoredMessagingIdentity | undefined;
+  if (raw) {
+    try {
+      const candidate = JSON.parse(raw) as StoredMessagingIdentity;
+      decodeStoredCertificate(candidate);
+      if (!/^0x[0-9a-fA-F]{64}$/.test(candidate.keyPair.privateKey)) throw new Error("invalid private key");
+      if (!/^0x[0-9a-fA-F]{64}$/.test(candidate.keyPair.publicKey)) throw new Error("invalid public key");
+      stored = candidate;
+    } catch {
+      localStorage.removeItem(storageKey);
+    }
+  }
+  const now = BigInt(Math.floor(Date.now() / 1_000));
+  if (
+    stored &&
+    same(stored.certificate.owner, address) &&
+    stored.certificate.publicKey === stored.keyPair.publicKey &&
+    BigInt(stored.certificate.validUntil) > now + 86_400n
+  ) {
+    messagingIdentity = stored.keyPair;
+    await relay.registerMessagingKey(decodeStoredCertificate(stored), stored.signature);
+    return;
+  }
+
+  const keyPair = stored?.keyPair ?? generateMessagingKeyPair();
+  const previousVersion = stored ? BigInt(stored.certificate.keyVersion) : 0n;
+  const certificate: MessagingKeyCertificate = {
+    protocolVersion: 1,
+    owner: address,
+    publicKey: keyPair.publicKey,
+    keyVersion: previousVersion >= BigInt(Date.now()) ? previousVersion + 1n : BigInt(Date.now()),
+    validFrom: now - 60n,
+    validUntil: now + 30n * 24n * 60n * 60n,
+  };
+  const signature = await wagmiSignTypedData(walletConfig, {
+    account: address,
+    connector: activeConnector,
+    domain: messagingKeyDomain(domain),
+    types: messagingKeyCertificateTypes,
+    primaryType: "MessagingKeyCertificate",
+    message: certificate,
+  });
+  await relay.registerMessagingKey(certificate, signature);
+  messagingIdentity = keyPair;
+  localStorage.setItem(storageKey, JSON.stringify({
+    keyPair,
+    certificate: {
+      ...certificate,
+      keyVersion: certificate.keyVersion.toString(),
+      validFrom: certificate.validFrom.toString(),
+      validUntil: certificate.validUntil.toString(),
+    },
+    signature,
+  } satisfies StoredMessagingIdentity));
+  log(`Registered wallet-bound messaging key ${short(keyPair.publicKey)}.`);
+}
+
+async function resolveMessagingKey(owner: Address): Promise<RegisteredMessagingKey | undefined> {
+  if (!relay) return undefined;
+  const registration = await relay.resolveMessagingKey(owner);
+  if (!registration) return undefined;
+  const valid = await verifyTypedData({
+    address: owner,
+    domain: messagingKeyDomain(domain),
+    types: messagingKeyCertificateTypes,
+    primaryType: "MessagingKeyCertificate",
+    message: registration.certificate,
+    signature: registration.signature,
+  });
+  if (!valid) throw new Error("Counterparty messaging certificate has an invalid wallet signature.");
+  resolvedMessagingKeys.set(owner.toLowerCase(), registration);
+  return registration;
 }
 
 async function connect(connector: Connector): Promise<void> {
@@ -143,23 +270,41 @@ async function connect(connector: Connector): Promise<void> {
   if (!accounts[0]) throw new Error("Wallet did not return an account.");
   address = accounts[0];
   activeConnector = connector;
-  await switchToModerato();
-  relay?.close().catch(() => undefined);
-  relay = new OfflaneClient(new WebSocketTransport(config.relayUrl));
-  await relay.connect();
-  await relay.authenticate({
-    address,
-    signMessage: (message) => signMessage(walletConfig, { message, account: address!, connector }),
-  });
   $("connectGate").hidden = true;
   $("product").hidden = false;
+  $("walletButton").textContent = short(address);
+  $("addressLine").textContent = `Wallet connected as ${address}. Approve the relay authentication signature.`;
+  $("relayState").textContent = "● Authenticating relay…";
+  $("relayState").classList.remove("online");
+  ($("walletDialog") as HTMLDialogElement).close();
+  log(`Wallet ${short(address)} connected. Waiting for relay authentication.`);
+
+  relay?.close().catch(() => undefined);
+  relay = new OfflaneClient(new WebSocketTransport(config.relayUrl));
+  try {
+    await relay.connect();
+    await relay.authenticate({
+      address,
+      signMessage: (message) => signMessage(walletConfig, { message, account: address!, connector }),
+    });
+    unsubscribeRelayEvents?.();
+    unsubscribeRelayEvents = relay.onEvent(handleRelayEvent);
+    $("addressLine").textContent = `Authenticated as ${address}. Approve the messaging identity once.`;
+    $("relayState").textContent = "● Registering messaging key…";
+    await ensureMessagingIdentity();
+  } catch (error) {
+    await relay.close().catch(() => undefined);
+    relay = undefined;
+    $("relayState").textContent = "● Connection setup failed";
+    $("addressLine").textContent = `Wallet connected as ${address}. Reconnect to retry wallet setup.`;
+    log(`Wallet setup failed for ${short(address)}.`);
+    throw error;
+  }
   $("relayState").textContent = "● Relay connected";
   $("relayState").classList.add("online");
-  $("walletButton").textContent = short(address);
   $("addressLine").textContent = `Authenticated as ${address}`;
   log(`Wallet ${short(address)} authenticated with the relay.`);
   await refreshChannels();
-  ($("walletDialog") as HTMLDialogElement).close();
 }
 
 function renderWalletOptions(): void {
@@ -182,6 +327,8 @@ async function disconnectForAccountChange(): Promise<void> {
   relay = undefined;
   address = undefined;
   activeConnector = undefined;
+  messagingIdentity = undefined;
+  resolvedMessagingKeys.clear();
   channels = [];
   $("product").hidden = true;
   $("connectGate").hidden = false;
@@ -222,7 +369,168 @@ function openChannelWorkspace(channelId: string): void {
   ($("detailCommitment") as HTMLInputElement).value = channel.current.appDataHash;
   ($("contractLink") as HTMLAnchorElement).href = `${config.explorerUrl}/address/${config.manager}`;
   ($("detailAgent") as HTMLButtonElement).disabled = channel.status !== "open";
-  ($("channelDialog") as HTMLDialogElement).showModal();
+  activeChannelId = channelId;
+  if (pendingProposal && !same(pendingProposal.state.channelId, channelId)) pendingProposal = undefined;
+  channelMessages = [];
+  $("detailMyKey").textContent = messagingIdentity ? short(messagingIdentity.publicKey) : "Unavailable";
+  $("detailMyKeyStatus").textContent = messagingIdentity ? "Wallet verified" : "Not registered";
+  $("detailPeerKey").textContent = "Resolving from wallet address…";
+  $("detailPeerKeyStatus").textContent = "Resolving";
+  ($("sendPayment") as HTMLButtonElement).disabled = true;
+  renderChannelTraffic();
+  void Promise.all([
+    refreshChannelTraffic(),
+    resolveWorkspaceCounterparty(peer, channel.status === "open"),
+  ]).catch((error) => toast(String((error as Error).message ?? error), true));
+  const dialog = $("channelDialog") as HTMLDialogElement;
+  if (!dialog.open) dialog.showModal();
+}
+
+async function resolveWorkspaceCounterparty(peer: Address, channelOpen: boolean): Promise<void> {
+  const registration = await resolveMessagingKey(peer);
+  if (!registration) {
+    $("detailPeerKey").textContent = "The counterparty has not registered a messaging key yet.";
+    $("detailPeerKeyStatus").textContent = "Waiting for registration";
+    ($("sendPayment") as HTMLButtonElement).disabled = true;
+    return;
+  }
+  $("detailPeerKey").textContent = short(registration.certificate.publicKey);
+  $("detailPeerKeyStatus").textContent = "Wallet verified";
+  ($("sendPayment") as HTMLButtonElement).disabled = !channelOpen;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
+}
+
+function renderChannelTraffic(): void {
+  if (!activeChannelId || !address) return;
+  $("messageList").innerHTML = channelMessages.length
+    ? channelMessages.map((record) => {
+        let plaintext = "Unable to decrypt with this browser key.";
+        try {
+          if (messagingIdentity) plaintext = decryptMessageText(record.envelope, messagingIdentity);
+        } catch {}
+        return `<div class="traffic-message"><div><b>${short(record.envelope.sender)}</b><span>${record.status}</span></div><p>${escapeHtml(plaintext)}</p><small>nonce ${record.envelope.stateNonce} · ${short(record.envelope.messageId)}</small></div>`;
+      }).join("")
+    : `<p class="empty">No received messages yet.</p>`;
+
+  if (!pendingProposal || same(pendingProposal.proposer, address)) {
+    $("pendingProposal").innerHTML = `<p class="empty">No payment proposal awaiting your approval.</p>`;
+    return;
+  }
+  const channel = channels.find((item) => item.current.channelId === pendingProposal!.state.channelId);
+  if (!channel) return;
+  const proposerIsA = same(pendingProposal.proposer, channel.participantA);
+  const amount = proposerIsA
+    ? channel.current.balanceA - pendingProposal.state.balanceA
+    : channel.current.balanceB - pendingProposal.state.balanceB;
+  $("pendingProposal").innerHTML = `<div class="proposal-review"><b>${Number(amount) / 1e6} PathUSD payment</b><p>${short(pendingProposal.proposer)} proposes nonce ${pendingProposal.state.nonce}.</p><div class="two"><button id="rejectPayment" class="secondary">Reject</button><button id="acceptPayment" class="primary">Sign and accept</button></div></div>`;
+}
+
+async function refreshChannelTraffic(): Promise<void> {
+  if (!relay || !activeChannelId) return;
+  const [messages, proposal] = await Promise.all([
+    relay.listMessages(activeChannelId as Bytes32),
+    relay.getPendingProposal(activeChannelId as Bytes32),
+  ]);
+  channelMessages = messages;
+  pendingProposal = proposal;
+  renderChannelTraffic();
+}
+
+function handleRelayEvent(message: { method: string; payload: Record<string, unknown> }): void {
+  if (message.method === "channels.v1.state_proposed") {
+    pendingProposal = stateProposalWireSchema.parse(message.payload);
+    log(`Received payment proposal ${short(pendingProposal.proposalId)} from ${short(pendingProposal.proposer)}.`);
+    toast("A counterparty payment proposal is ready for review.");
+    if (activeChannelId && same(pendingProposal.state.channelId, activeChannelId)) {
+      void refreshChannelTraffic().catch(() => renderChannelTraffic());
+    }
+  }
+  if (message.method === "channels.v1.state_rejected") {
+    pendingProposal = undefined;
+    log("The counterparty rejected the pending payment proposal.");
+    toast("Payment proposal rejected by the counterparty.", true);
+    renderChannelTraffic();
+  }
+  if (message.method === "channels.v1.state_updated") {
+    pendingProposal = undefined;
+    void refreshChannels().then(() => {
+      if (!activeChannelId) return;
+      openChannelWorkspace(activeChannelId);
+    }).catch(() => undefined);
+  }
+  if (message.method === "messages.v1.received" && activeChannelId) {
+    void refreshChannelTraffic().catch(() => undefined);
+  }
+}
+
+async function proposePayment(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  if (!relay || !address || !activeChannelId) throw new Error("Connect and authenticate with the relay first.");
+  const channel = channels.find((item) => item.current.channelId === activeChannelId);
+  if (!channel || channel.status !== "open") throw new Error("Select an open channel.");
+  if (!messagingIdentity) throw new Error("Your wallet-bound messaging key is unavailable.");
+  const existingProposal = await relay.getPendingProposal(activeChannelId as Bytes32);
+  if (existingProposal) throw new Error("This channel already has a payment awaiting approval.");
+  const amount = parseUnits(($("paymentAmount") as HTMLInputElement).value, 6);
+  const mineA = same(address, channel.participantA);
+  const available = mineA ? channel.current.balanceA : channel.current.balanceB;
+  if (amount <= 0n || amount > available) throw new Error("Payment must be positive and no greater than your channel balance.");
+  const recipient = mineA ? channel.participantB : channel.participantA;
+  const peerRegistration =
+    resolvedMessagingKeys.get(recipient.toLowerCase()) ?? await resolveMessagingKey(recipient);
+  if (!peerRegistration) {
+    throw new Error("The counterparty must connect to OffLane once to register a messaging key.");
+  }
+  const nextNonce = channel.current.nonce + 1n;
+  const envelope = encryptMessage({
+    channelId: activeChannelId as Bytes32,
+    sender: address,
+    recipient,
+    sequence: nextMessageSequence(activeChannelId),
+    stateNonce: nextNonce,
+    senderKeyPair: messagingIdentity,
+    recipientPublicKey: peerRegistration.certificate.publicKey,
+    plaintext: ($("paymentMessage") as HTMLTextAreaElement).value,
+    contentType: "text/plain",
+  });
+  const state: ChannelState = {
+    channelId: activeChannelId as Bytes32,
+    nonce: nextNonce,
+    balanceA: mineA ? channel.current.balanceA - amount : channel.current.balanceA + amount,
+    balanceB: mineA ? channel.current.balanceB + amount : channel.current.balanceB - amount,
+    appDataHash: envelope.messageId,
+  };
+  const authorization = { kind: "direct" as const, stateSignature: await signTypedData(channelStateTypes, "ChannelState", state) };
+  const proposalId = bytesToHex(crypto.getRandomValues(new Uint8Array(32))) as Bytes32;
+  await relay.sendMessage(envelope);
+  await relay.proposeState({ proposalId, proposer: address, baseStateHash: hashChannelState(domain, channel.current), state, authorization });
+  log(`Proposed ${Number(amount) / 1e6} PathUSD to ${short(recipient)} at nonce ${nextNonce}.`);
+  ($("paymentMessage") as HTMLTextAreaElement).value = "";
+  toast("Encrypted message sent. Waiting for the counterparty to accept the payment.");
+}
+
+async function acceptPendingPayment(): Promise<void> {
+  if (!relay || !address || !pendingProposal) return;
+  const proposal = pendingProposal;
+  const authorization = { kind: "direct" as const, stateSignature: await signTypedData(channelStateTypes, "ChannelState", proposal.state) };
+  await relay.acceptState({ proposalId: proposal.proposalId, accepter: address, state: proposal.state, authorization });
+  const matching = channelMessages.find((record) => same(record.envelope.messageId, proposal.state.appDataHash));
+  if (matching) await relay.acknowledgeMessage(proposal.state.channelId, matching.envelope.messageId);
+  pendingProposal = undefined;
+  toast("Payment accepted and the channel state was updated.");
+  await refreshChannels();
+  openChannelWorkspace(proposal.state.channelId);
+}
+
+async function rejectPendingPayment(): Promise<void> {
+  if (!relay || !pendingProposal) return;
+  await relay.rejectState(pendingProposal.proposalId, pendingProposal.state.channelId, "Rejected by counterparty");
+  pendingProposal = undefined;
+  renderChannelTraffic();
+  toast("Payment proposal rejected.");
 }
 
 function renderChannels(): void {
@@ -399,6 +707,24 @@ $("refreshChannels").addEventListener("click", () => refreshChannels().catch((er
 $("createForm").addEventListener("submit", (event) => openChannel(event as SubmitEvent).catch((error) => toast(String(error.message ?? error), true)));
 $("joinForm").addEventListener("submit", (event) => joinChannel(event as SubmitEvent).catch((error) => toast(String(error.message ?? error), true)));
 $("agentForm").addEventListener("submit", (event) => authorizeAgent(event as SubmitEvent).catch((error) => toast(String(error.message ?? error), true)));
+$("sendPaymentForm").addEventListener("submit", (event) => proposePayment(event as SubmitEvent).catch((error) => toast(String((error as Error).message ?? error), true)));
+$("refreshPeerKey").addEventListener("click", () => {
+  if (!activeChannelId || !address) return;
+  const channel = channels.find((item) => item.current.channelId === activeChannelId);
+  if (!channel) return;
+  const peer = same(address, channel.participantA) ? channel.participantB : channel.participantA;
+  resolvedMessagingKeys.delete(peer.toLowerCase());
+  $("detailPeerKeyStatus").textContent = "Resolving";
+  $("detailPeerKey").textContent = "Resolving from wallet address…";
+  void resolveWorkspaceCounterparty(peer, channel.status === "open")
+    .catch((error) => toast(String((error as Error).message ?? error), true));
+});
+$("refreshTraffic").addEventListener("click", () => refreshChannelTraffic().catch((error) => toast(String((error as Error).message ?? error), true)));
+$("pendingProposal").addEventListener("click", (event) => {
+  const target = event.target as HTMLElement;
+  if (target.closest("#acceptPayment")) void acceptPendingPayment().catch((error) => toast(String((error as Error).message ?? error), true));
+  if (target.closest("#rejectPayment")) void rejectPendingPayment().catch((error) => toast(String((error as Error).message ?? error), true));
+});
 $("copyInvite").addEventListener("click", () => navigator.clipboard.writeText(($('inviteOutput') as HTMLTextAreaElement).value).then(() => toast("Invite copied.")));
 $("allChannels").addEventListener("click", (event) => {
   const card = (event.target as HTMLElement).closest<HTMLElement>("[data-channel]");
@@ -416,6 +742,7 @@ window.addEventListener("beforeunload", closeClients);
 return () => {
   unwatchConnectors();
   unwatchAccount();
+  unsubscribeRelayEvents?.();
   for (const button of closeButtons) button.removeEventListener("click", closeDialog);
   window.removeEventListener("beforeunload", closeClients);
   closeClients();

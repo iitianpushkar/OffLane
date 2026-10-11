@@ -7,6 +7,7 @@ import {
   encryptedEnvelopeWireSchema,
   encryptedMessageRecordWireSchema,
   hexSchema,
+  messagingKeyCertificateWireSchema,
   protocolMethodSchema,
   stateAuthorizationWireSchema,
   uint64StringSchema,
@@ -61,6 +62,41 @@ export const stateProposalWireSchema = z
     baseStateHash: bytes32Schema,
     state: channelStateWireSchema,
     authorization: stateAuthorizationWireSchema,
+  })
+  .strict();
+
+export const pendingProposalResponseWireSchema = z
+  .object({ proposal: stateProposalWireSchema.nullable() })
+  .strict();
+
+export const messagingKeyRegistrationWireSchema = z
+  .object({
+    certificate: messagingKeyCertificateWireSchema,
+    signature: hexSchema,
+  })
+  .strict();
+
+export const messagingKeyResolutionWireSchema = z
+  .object({ owner: addressSchema })
+  .strict();
+
+export const messagingKeyRevocationWireSchema = z
+  .object({
+    owner: addressSchema,
+    keyVersion: uint64StringSchema,
+  })
+  .strict();
+
+export const messagingKeyResolutionResponseWireSchema = z
+  .object({
+    registration: z
+      .object({
+        certificate: messagingKeyCertificateWireSchema,
+        signature: hexSchema,
+        registeredAt: safeIntegerSchema,
+      })
+      .strict()
+      .nullable(),
   })
   .strict();
 

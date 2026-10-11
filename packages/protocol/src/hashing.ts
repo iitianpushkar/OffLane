@@ -9,6 +9,7 @@ import type {
   ChannelCapability,
   ChannelState,
   EncryptedEnvelope,
+  MessagingKeyCertificate,
   PaymentMetadata,
 } from "./types.js";
 
@@ -35,6 +36,38 @@ export const channelCapabilityTypes = {
     { name: "capabilityNonce", type: "uint256" },
   ],
 } as const;
+
+export const messagingKeyCertificateTypes = {
+  MessagingKeyCertificate: [
+    { name: "protocolVersion", type: "uint8" },
+    { name: "owner", type: "address" },
+    { name: "publicKey", type: "bytes32" },
+    { name: "keyVersion", type: "uint64" },
+    { name: "validFrom", type: "uint64" },
+    { name: "validUntil", type: "uint64" },
+  ],
+} as const;
+
+export function messagingKeyDomain(domain: TypedDataDomain): TypedDataDomain {
+  return {
+    name: "OffLane Messaging",
+    version: "1",
+    chainId: domain.chainId,
+    verifyingContract: domain.verifyingContract,
+  };
+}
+
+export function hashMessagingKeyCertificate(
+  domain: TypedDataDomain,
+  certificate: MessagingKeyCertificate,
+): Bytes32 {
+  return hashTypedData({
+    domain: messagingKeyDomain(domain),
+    types: messagingKeyCertificateTypes,
+    primaryType: "MessagingKeyCertificate",
+    message: certificate,
+  });
+}
 
 export function hashChannelState(
   domain: TypedDataDomain,

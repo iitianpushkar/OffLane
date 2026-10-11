@@ -6,6 +6,7 @@ import {
   createRpcMessage,
   encodeChannelState,
   encodeEncryptedMessageRecord,
+  encodeMessagingKeyCertificate,
   encodeStateAuthorization,
   hashEncryptedEnvelope,
   hashChannelState,
@@ -15,6 +16,9 @@ import {
   messageAcknowledgementWireSchema,
   messageListWireSchema,
   messageSendWireSchema,
+  messagingKeyRegistrationWireSchema,
+  messagingKeyResolutionWireSchema,
+  messagingKeyRevocationWireSchema,
   protocolRequestMethods,
   resolveProposalCollision,
   RpcMessageType,
@@ -131,8 +135,16 @@ export class RelayCore {
         return this.rejectState(session, request.payload);
       case "channels.v1.get_state":
         return this.getState(session, request.payload);
+      case "channels.v1.get_pending":
+        return this.getPendingProposal(session, request.payload);
       case "channels.v1.list":
         return this.listChannels(session);
+      case "keys.v1.register":
+        return this.registerMessagingKey(session, request.payload);
+      case "keys.v1.resolve":
+        return this.resolveMessagingKey(session, request.payload);
+      case "keys.v1.revoke":
+        return this.revokeMessagingKey(session, request.payload);
       case "messages.v1.send":
         return this.sendMessage(session, request.payload);
       case "messages.v1.list":
@@ -397,6 +409,30 @@ export class RelayCore {
     return this.channelPayload(channel);
   }
 
+  private async getPendingProposal(
+    session: RelaySession,
+    payload: RpcPayload,
+  ): Promise<RpcPayload> {
+    const { channelId } = parseStateQueryPayload(payload);
+    const channel = await this.requireChannel(channelId);
+    if (
+      !this.hub.isAuthorized(session, channel.participantA) &&
+      !this.hub.isAuthorized(session, channel.participantB)
+    ) {
+      throw new RelayError("UNAUTHORIZED", "only a channel participant may read its pending proposal");
+    }
+    const pending = await this.store.getPendingByChannel(channelId);
+    return {
+      proposal: pending
+        ? {
+            ...pending.proposal,
+            state: encodeChannelState(pending.proposal.state),
+            authorization: encodeStateAuthorization(pending.proposal.authorization),
+          }
+        : null,
+    };
+  }
+
   private async listChannels(session: RelaySession): Promise<RpcPayload> {
     if (!session.signer) {
       throw new RelayError("UNAUTHENTICATED", "authenticate before listing channels");
@@ -415,6 +451,99 @@ export class RelayCore {
         current: encodeChannelState(channel.current),
       })),
     };
+  }
+
+  private async registerMessagingKey(
+    session: RelaySession,
+    payload: RpcPayload,
+  ): Promise<RpcPayload> {
+    const { certificate, signature } = messagingKeyRegistrationWireSchema.parse(payload);
+    if (!session.signer) {
+      throw new RelayError("UNAUTHENTICATED", "authenticate before registering a messaging key");
+    }
+    if (!sameAddress(session.signer, certificate.owner)) {
+      throw new RelayError("SIGNER_MISMATCH", "messaging key owner must match the authenticated wallet");
+    }
+    const nowSeconds = BigInt(Math.floor(this.now() / 1_000));
+    if (certificate.validFrom > nowSeconds + 300n || certificate.validUntil <= nowSeconds) {
+      throw new RelayError("INVALID_KEY_TIME", "messaging key certificate is not currently valid");
+    }
+    if (certificate.validUntil - certificate.validFrom > 366n * 24n * 60n * 60n) {
+      throw new RelayError("INVALID_KEY_TIME", "messaging key certificate lifetime exceeds one year");
+    }
+    if (!(await this.verifier.verifyMessagingKeyCertificate(certificate, signature))) {
+      throw new RelayError("INVALID_SIGNATURE", "messaging key certificate signature is invalid");
+    }
+    const existing = await this.store.getMessagingKey(certificate.owner);
+    if (existing && existing.certificate.keyVersion > certificate.keyVersion) {
+      throw new RelayError("STALE_KEY", "messaging key version is older than the registered key");
+    }
+    if (existing && existing.certificate.keyVersion === certificate.keyVersion) {
+      if (
+        existing.revokedAt !== undefined ||
+        existing.certificate.publicKey.toLowerCase() !== certificate.publicKey.toLowerCase() ||
+        existing.signature.toLowerCase() !== signature.toLowerCase()
+      ) {
+        throw new RelayError("KEY_VERSION_CONFLICT", "messaging key version is already used");
+      }
+      return { owner: certificate.owner, keyVersion: certificate.keyVersion.toString(), status: "registered" };
+    }
+    await this.store.saveMessagingKey({ certificate, signature, registeredAt: this.now() });
+    return { owner: certificate.owner, keyVersion: certificate.keyVersion.toString(), status: "registered" };
+  }
+
+  private async resolveMessagingKey(
+    session: RelaySession,
+    payload: RpcPayload,
+  ): Promise<RpcPayload> {
+    const { owner } = messagingKeyResolutionWireSchema.parse(payload);
+    if (!session.signer) {
+      throw new RelayError("UNAUTHENTICATED", "authenticate before resolving messaging keys");
+    }
+    const identities = [
+      session.signer,
+      ...[...session.participants].map((participant) => participant as Address),
+    ];
+    if (!identities.some((identity) => sameAddress(identity, owner))) {
+      const channels = await this.store.listChannels(identities);
+      const sharesChannel = channels.some(
+        (channel) =>
+          sameAddress(channel.participantA, owner) || sameAddress(channel.participantB, owner),
+      );
+      if (!sharesChannel) {
+        throw new RelayError("UNAUTHORIZED", "messaging keys are only visible to channel counterparties");
+      }
+    }
+    const registration = await this.store.getMessagingKey(owner);
+    const nowSeconds = BigInt(Math.floor(this.now() / 1_000));
+    if (
+      !registration ||
+      registration.revokedAt !== undefined ||
+      registration.certificate.validFrom > nowSeconds ||
+      registration.certificate.validUntil <= nowSeconds
+    ) {
+      return { registration: null };
+    }
+    return {
+      registration: {
+        certificate: encodeMessagingKeyCertificate(registration.certificate),
+        signature: registration.signature,
+        registeredAt: registration.registeredAt,
+      },
+    };
+  }
+
+  private async revokeMessagingKey(
+    session: RelaySession,
+    payload: RpcPayload,
+  ): Promise<RpcPayload> {
+    const { owner, keyVersion } = messagingKeyRevocationWireSchema.parse(payload);
+    if (!session.signer || !sameAddress(session.signer, owner)) {
+      throw new RelayError("SIGNER_MISMATCH", "only the authenticated key owner may revoke it");
+    }
+    const revoked = await this.store.revokeMessagingKey(owner, keyVersion, this.now());
+    if (!revoked) throw new RelayError("KEY_NOT_FOUND", "messaging key version was not found");
+    return { owner, keyVersion: keyVersion.toString(), status: "revoked" };
   }
 
   private async sendMessage(

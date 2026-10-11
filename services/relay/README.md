@@ -19,6 +19,20 @@ keys. `AuthorizationVerifier` is an explicit adapter boundary for adding
 Tempo TIP-1020 P256 and WebAuthn verification without changing relay state
 progression.
 
+Participants can call `channels.v1.get_pending` after reconnecting to recover
+the current channel proposal before accepting or rejecting it. Pending
+proposals use the same participant authorization checks as channel state
+queries and survive relay restarts in SQLite.
+
+## Messaging-key directory
+
+Authenticated wallets register EIP-712-signed X25519 certificates through
+`keys.v1.register`. A participant can call `keys.v1.resolve` only for itself or
+an address sharing one of its indexed channels. The relay verifies wallet
+ownership, certificate time bounds, and monotonically increasing versions;
+`keys.v1.revoke` leaves a version tombstone so a revoked certificate cannot be
+replayed. Certificates and revocations persist in SQLite.
+
 ## Encrypted message routing
 
 Authenticated channel participants and registered delegated agents can call:

@@ -5,11 +5,13 @@ import {
   encodeStateAuthorization,
   channelStateWireSchema,
   encryptedEnvelopeWireSchema,
+  messagingKeyCertificateWireSchema,
   stateAuthorizationWireSchema,
   stateProposalWireSchema,
   type Address,
   type Bytes32,
   type EncryptedMessageRecord,
+  type Hex,
   type StateAcceptanceMessage,
 } from "@offlane/protocol";
 import type {
@@ -18,6 +20,7 @@ import type {
   RelayChannel,
   RelayChannelStatus,
   RelayStore,
+  StoredMessagingKey,
 } from "./store.js";
 
 interface ChannelRow {
@@ -41,6 +44,13 @@ interface MessageRow {
   sent_at: number;
   delivered_at: number | null;
   acknowledged_at: number | null;
+}
+
+interface MessagingKeyRow {
+  certificate: string;
+  signature: string;
+  registered_at: number;
+  revoked_at: number | null;
 }
 
 function stringify(value: unknown): string {
@@ -143,6 +153,13 @@ export class SqliteRelayStore implements RelayStore {
       );
       CREATE INDEX IF NOT EXISTS encrypted_messages_recipient
         ON encrypted_messages(channel_id, recipient);
+      CREATE TABLE IF NOT EXISTS messaging_keys (
+        owner TEXT PRIMARY KEY,
+        certificate TEXT NOT NULL,
+        signature TEXT NOT NULL,
+        registered_at INTEGER NOT NULL,
+        revoked_at INTEGER
+      );
     `);
   }
 
@@ -486,6 +503,63 @@ export class SqliteRelayStore implements RelayStore {
       `)
       .run(acknowledgedAt, acknowledgedAt, messageId.toLowerCase());
     if (result.changes !== 1) throw new Error("message does not exist");
+  }
+
+  async getMessagingKey(owner: Address): Promise<StoredMessagingKey | undefined> {
+    const row = this.database
+      .prepare(`
+        SELECT certificate, signature, registered_at, revoked_at
+        FROM messaging_keys WHERE owner = ?
+      `)
+      .get(owner.toLowerCase()) as MessagingKeyRow | undefined;
+    if (!row) return undefined;
+    return {
+      certificate: messagingKeyCertificateWireSchema.parse(JSON.parse(row.certificate)),
+      signature: row.signature as Hex,
+      registeredAt: row.registered_at,
+      ...(row.revoked_at === null ? {} : { revokedAt: row.revoked_at }),
+    };
+  }
+
+  async saveMessagingKey(registration: StoredMessagingKey): Promise<void> {
+    this.database
+      .prepare(`
+        INSERT INTO messaging_keys (
+          owner, certificate, signature, registered_at, revoked_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(owner) DO UPDATE SET
+          certificate = excluded.certificate,
+          signature = excluded.signature,
+          registered_at = excluded.registered_at,
+          revoked_at = excluded.revoked_at
+      `)
+      .run(
+        registration.certificate.owner.toLowerCase(),
+        stringify({
+          ...registration.certificate,
+          keyVersion: registration.certificate.keyVersion.toString(),
+          validFrom: registration.certificate.validFrom.toString(),
+          validUntil: registration.certificate.validUntil.toString(),
+        }),
+        registration.signature,
+        registration.registeredAt,
+        registration.revokedAt ?? null,
+      );
+  }
+
+  async revokeMessagingKey(
+    owner: Address,
+    keyVersion: bigint,
+    revokedAt: number,
+  ): Promise<boolean> {
+    const current = await this.getMessagingKey(owner);
+    if (!current || current.certificate.keyVersion !== keyVersion) return false;
+    const result = this.database
+      .prepare(`
+        UPDATE messaging_keys SET revoked_at = ? WHERE owner = ?
+      `)
+      .run(revokedAt, owner.toLowerCase());
+    return result.changes === 1;
   }
 
   close(): void {

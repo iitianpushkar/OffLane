@@ -7,6 +7,7 @@ import type {
   ChannelState,
   EncryptedEnvelope,
   EncryptedMessageRecord,
+  MessagingKeyCertificate,
   StateAuthorization,
 } from "./types.js";
 
@@ -92,6 +93,20 @@ export const channelCapabilityWireSchema = z
     { message: "maxNetSpend cannot exceed baselineBalance" },
   );
 
+export const messagingKeyCertificateWireSchema = z
+  .object({
+    protocolVersion: z.literal(1),
+    owner: addressSchema,
+    publicKey: bytes32Schema,
+    keyVersion: uint64StringSchema,
+    validFrom: uint64StringSchema,
+    validUntil: uint64StringSchema,
+  })
+  .strict()
+  .refine((certificate) => certificate.validUntil > certificate.validFrom, {
+    message: "validUntil must be later than validFrom",
+  });
+
 export const stateAuthorizationWireSchema = z.discriminatedUnion("kind", [
   z
     .object({
@@ -118,7 +133,11 @@ export const protocolRequestMethods = [
   "channels.v1.accept_state",
   "channels.v1.reject_state",
   "channels.v1.get_state",
+  "channels.v1.get_pending",
   "channels.v1.list",
+  "keys.v1.register",
+  "keys.v1.resolve",
+  "keys.v1.revoke",
   "messages.v1.send",
   "messages.v1.list",
   "messages.v1.acknowledge",
@@ -178,6 +197,15 @@ export function encodeChannelCapability(capability: ChannelCapability): {
     baselineBalance: capability.baselineBalance.toString(),
     maxNetSpend: capability.maxNetSpend.toString(),
     capabilityNonce: capability.capabilityNonce.toString(),
+  };
+}
+
+export function encodeMessagingKeyCertificate(certificate: MessagingKeyCertificate) {
+  return {
+    ...certificate,
+    keyVersion: certificate.keyVersion.toString(),
+    validFrom: certificate.validFrom.toString(),
+    validUntil: certificate.validUntil.toString(),
   };
 }
 

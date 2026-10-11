@@ -25,6 +25,28 @@ Open `http://127.0.0.1:4173`. Next.js reads the repository-root `.env` during
 local development. Wallet signatures and transactions still require explicit
 approval. The interface is fixed to Tempo Moderato chain ID `42431`.
 
+## Encrypted payment flow
+
+Use two browser profiles so each participant can connect a different wallet:
+
+1. Both participants open the same joined channel from **Channels**.
+2. On first connection, each wallet signs a 30-day messaging-key certificate.
+3. OffLane resolves the counterparty's signed key automatically from the
+   wallet address recorded in the channel.
+4. Either participant writes a message, enters a PathUSD amount, and selects
+   **Sign and propose payment**.
+5. The recipient opens or refreshes the channel, reads the decrypted message,
+   and accepts or rejects the proposal.
+6. After acceptance, both workspaces show the new nonce and balances. Repeat
+   from the other wallet to test the reverse direction.
+
+Messaging private keys are generated in the browser and stored in that
+profile's local storage. The relay stores the wallet-signed public-key
+certificate, encrypted envelopes, and signed pending proposals. It cannot
+decrypt messages. A recipient can recover a proposal after reconnecting or
+restarting the browser. Restart the relay after pulling protocol or relay
+changes so it recognizes the latest RPC methods.
+
 The local `/demo` route can start the CLI demo and stream its output. Its test
 private keys stay in the Node process and are never returned by an API route.
 The process-spawning demo is disabled on Vercel.

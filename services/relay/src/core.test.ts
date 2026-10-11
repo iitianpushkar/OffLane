@@ -5,9 +5,12 @@ import {
   encodeChannelCapability,
   encodeChannelState,
   encodeEncryptedEnvelope,
+  encodeMessagingKeyCertificate,
   encodeStateAuthorization,
   hashChannelState,
   hashEncryptedEnvelope,
+  messagingKeyCertificateTypes,
+  messagingKeyDomain,
   protocolRequestMethods,
   RpcMessageType,
   type Address,
@@ -15,6 +18,7 @@ import {
   type ChannelCapability,
   type ChannelState,
   type EncryptedEnvelope,
+  type MessagingKeyCertificate,
   type ProtocolMethod,
   type RpcMessage,
   type RpcPayload,
@@ -264,6 +268,17 @@ describe("RelayCore", () => {
       ),
     );
     expect(bobSession.events.at(-1)?.method).toBe("channels.v1.state_proposed");
+    const pendingView = await core.handle(
+      bobSession,
+      request("channels.v1.get_pending", { channelId: CHANNEL }),
+    );
+    expect(pendingView).toMatchObject({
+      proposal: {
+        proposalId: proposalOne,
+        proposer: alice.address,
+        state: encodeChannelState(aToB),
+      },
+    });
 
     const bobAcceptance = await directAuthorization(bob, aToB);
     await core.handle(
@@ -273,6 +288,12 @@ describe("RelayCore", () => {
         acceptancePayload(proposalOne, bob.address, aToB, bobAcceptance),
       ),
     );
+    await expect(
+      core.handle(
+        bobSession,
+        request("channels.v1.get_pending", { channelId: CHANNEL }),
+      ),
+    ).resolves.toEqual({ proposal: null });
 
     const bToA: ChannelState = {
       ...aToB,
@@ -375,6 +396,88 @@ describe("RelayCore", () => {
       code: "INVALID_SIGNATURE",
       message: "proposal authorization is invalid",
     });
+  });
+
+  it("registers wallet-signed messaging keys for channel-only discovery and revocation", async () => {
+    const store = new MemoryRelayStore();
+    const initial: ChannelState = {
+      channelId: CHANNEL,
+      nonce: 0n,
+      balanceA: 100n,
+      balanceB: 100n,
+      appDataHash: EMPTY_HASH,
+    };
+    await store.saveChannel({
+      participantA: alice.address,
+      participantB: bob.address,
+      token: TOKEN,
+      status: "open",
+      current: initial,
+    });
+    const core = new RelayCore(
+      store,
+      new ViemAuthorizationVerifier(domain),
+      domain,
+      undefined,
+      { now: () => NOW },
+    );
+    const aliceSession = session("alice-key");
+    const bobSession = session("bob-key");
+    const outsiderSession = session("outsider-key");
+    await authenticate(core, aliceSession, alice);
+    await authenticate(core, bobSession, bob);
+    await authenticate(core, outsiderSession, aliceAgent);
+
+    const certificate: MessagingKeyCertificate = {
+      protocolVersion: 1,
+      owner: alice.address,
+      publicKey: `0x${"71".repeat(32)}` as Bytes32,
+      keyVersion: 1n,
+      validFrom: BigInt(Math.floor(NOW / 1_000) - 60),
+      validUntil: BigInt(Math.floor(NOW / 1_000) + 86_400),
+    };
+    const signature = await alice.signTypedData({
+      domain: messagingKeyDomain(domain),
+      types: messagingKeyCertificateTypes,
+      primaryType: "MessagingKeyCertificate",
+      message: certificate,
+    });
+    const registration = {
+      certificate: encodeMessagingKeyCertificate(certificate),
+      signature,
+    };
+
+    await core.handle(aliceSession, request("keys.v1.register", registration));
+    const resolved = await core.handle(
+      bobSession,
+      request("keys.v1.resolve", { owner: alice.address }),
+    );
+    expect(resolved).toMatchObject({
+      registration: {
+        certificate: { owner: alice.address, publicKey: certificate.publicKey, keyVersion: "1" },
+        signature,
+      },
+    });
+    await expect(
+      core.handle(
+        outsiderSession,
+        request("keys.v1.resolve", { owner: alice.address }),
+      ),
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(
+      core.handle(bobSession, request("keys.v1.register", registration)),
+    ).rejects.toMatchObject({ code: "SIGNER_MISMATCH" });
+
+    await core.handle(
+      aliceSession,
+      request("keys.v1.revoke", { owner: alice.address, keyVersion: "1" }),
+    );
+    await expect(
+      core.handle(bobSession, request("keys.v1.resolve", { owner: alice.address })),
+    ).resolves.toEqual({ registration: null });
+    await expect(
+      core.handle(aliceSession, request("keys.v1.register", registration)),
+    ).rejects.toMatchObject({ code: "KEY_VERSION_CONFLICT" });
   });
 
   it("routes, persists, acknowledges, and binds encrypted messages to states", async () => {

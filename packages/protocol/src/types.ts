@@ -47,6 +47,21 @@ export interface EncryptedMessageRecord {
   acknowledgedAt?: number;
 }
 
+export interface MessagingKeyCertificate {
+  protocolVersion: 1;
+  owner: Address;
+  publicKey: Bytes32;
+  keyVersion: bigint;
+  validFrom: bigint;
+  validUntil: bigint;
+}
+
+export interface RegisteredMessagingKey {
+  certificate: MessagingKeyCertificate;
+  signature: Hex;
+  registeredAt: number;
+}
+
 export type StateAuthorization =
   | {
       kind: "direct";
