@@ -1,10 +1,12 @@
 import {
   channelCapabilityTypes,
+  channelStateWireSchema,
   channelStateTypes,
   hashChannelState,
   messagingKeyCertificateTypes,
   messagingKeyDomain,
   stateProposalWireSchema,
+  stateAuthorizationWireSchema,
   type Address,
   type Bytes32,
   type ChannelCapability,
@@ -15,6 +17,7 @@ import {
   type MessagingKeyCertificate,
   type RegisteredMessagingKey,
   type StateProposalMessage,
+  type StateAuthorization,
 } from "@offlane/protocol";
 import {
   decryptMessageText,
@@ -85,11 +88,38 @@ const intentTypes = {
 } as const;
 
 const erc20Abi = parseAbi(["function approve(address spender,uint256 amount) returns (bool)"]);
+const stateComponents = [
+  { name: "channelId", type: "bytes32" },
+  { name: "nonce", type: "uint64" },
+  { name: "balanceA", type: "uint128" },
+  { name: "balanceB", type: "uint128" },
+  { name: "appDataHash", type: "bytes32" },
+] as const;
+const capabilityComponents = [
+  { name: "protocolVersion", type: "uint8" },
+  { name: "channelId", type: "bytes32" },
+  { name: "participant", type: "address" },
+  { name: "delegatedSigner", type: "address" },
+  { name: "counterparty", type: "address" },
+  { name: "token", type: "address" },
+  { name: "baselineBalance", type: "uint128" },
+  { name: "maxNetSpend", type: "uint128" },
+  { name: "capabilityNonce", type: "uint256" },
+] as const;
+const authorizationComponents = [
+  { name: "stateSignature", type: "bytes" },
+  { name: "capability", type: "tuple", components: capabilityComponents },
+  { name: "capabilitySignature", type: "bytes" },
+] as const;
 const managerAbi = [
   { type: "function", name: "computeChannelId", stateMutability: "view", inputs: [{ name: "intent", type: "tuple", components: intentTypes.ChannelIntent }], outputs: [{ name: "", type: "bytes32" }] },
   { type: "function", name: "openChannel", stateMutability: "nonpayable", inputs: [{ name: "intent", type: "tuple", components: intentTypes.ChannelIntent }, { name: "signatureA", type: "bytes" }], outputs: [{ name: "channelId", type: "bytes32" }] },
   { type: "function", name: "joinChannel", stateMutability: "nonpayable", inputs: [{ name: "intent", type: "tuple", components: intentTypes.ChannelIntent }, { name: "signatureB", type: "bytes" }], outputs: [] },
+  { type: "function", name: "cooperativeCloseWithCapabilities", stateMutability: "nonpayable", inputs: [{ name: "state", type: "tuple", components: stateComponents }, { name: "authorizationA", type: "tuple", components: authorizationComponents }, { name: "authorizationB", type: "tuple", components: authorizationComponents }], outputs: [] },
 ] as const;
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
+const ZERO_HASH = `0x${"00".repeat(32)}` as Bytes32;
 
 export async function initializeProduct(): Promise<() => void> {
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -230,6 +260,35 @@ function short(value: string): string {
 
 function same(left: string, right: string): boolean {
   return left.toLowerCase() === right.toLowerCase();
+}
+
+function formatPathUsd(value: bigint): string {
+  return `${Number(value) / 1e6} PathUSD`;
+}
+
+function onchainAuthorization(authorization: StateAuthorization) {
+  if (authorization.kind === "capability") {
+    return {
+      stateSignature: authorization.stateSignature,
+      capability: authorization.capability,
+      capabilitySignature: authorization.capabilitySignature,
+    };
+  }
+  return {
+    stateSignature: authorization.stateSignature,
+    capability: {
+      protocolVersion: 0,
+      channelId: ZERO_HASH,
+      participant: ZERO_ADDRESS,
+      delegatedSigner: ZERO_ADDRESS,
+      counterparty: ZERO_ADDRESS,
+      token: ZERO_ADDRESS,
+      baselineBalance: 0n,
+      maxNetSpend: 0n,
+      capabilityNonce: 0n,
+    },
+    capabilitySignature: "0x" as Hex,
+  };
 }
 
 interface StoredMessagingIdentity {
@@ -486,6 +545,11 @@ function openChannelWorkspace(channelId: string): void {
   ($("detailCommitment") as HTMLInputElement).value = channel.current.appDataHash;
   ($("contractLink") as HTMLAnchorElement).href = `${config.explorerUrl}/address/${config.manager}`;
   ($("detailAgent") as HTMLButtonElement).disabled = channel.status !== "open";
+  const settleButton = $("settleChannel") as HTMLButtonElement;
+  settleButton.disabled = channel.status !== "open" || channel.current.nonce === 0n;
+  settleButton.title = channel.current.nonce === 0n
+    ? "Complete at least one mutually signed payment before settlement."
+    : "Pay the latest mutually signed balances back to both wallets.";
   activeChannelId = channelId;
   if (pendingProposal && !same(pendingProposal.state.channelId, channelId)) pendingProposal = undefined;
   channelMessages = [];
@@ -740,6 +804,58 @@ async function sendContract(to: Address, data: Hex): Promise<Hex> {
   return hash;
 }
 
+async function waitForSettlementIndex(channelId: string): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await refreshChannels();
+    if (!channels.some((channel) => same(channel.current.channelId, channelId))) {
+      toast("Relay indexed the settlement. The channel is now closed.");
+      return;
+    }
+  }
+}
+
+async function settleActiveChannel(): Promise<void> {
+  if (!relay || !address || !activeChannelId) throw new Error("Connect and select an open channel first.");
+  const channel = channels.find((item) => same(item.current.channelId, activeChannelId!));
+  if (!channel || channel.status !== "open") throw new Error("Select an open channel.");
+
+  const button = $("settleChannel") as HTMLButtonElement;
+  button.disabled = true;
+  button.textContent = "Loading final state…";
+  try {
+    const payload = await relay.getState(activeChannelId as Bytes32);
+    const state = channelStateWireSchema.parse(payload.state);
+    if (!payload.authorizationA || !payload.authorizationB) {
+      throw new Error("Complete at least one mutually accepted payment before settlement.");
+    }
+    const authorizationA = stateAuthorizationWireSchema.parse(payload.authorizationA);
+    const authorizationB = stateAuthorizationWireSchema.parse(payload.authorizationB);
+    const data = encodeFunctionData({
+      abi: managerAbi,
+      functionName: "cooperativeCloseWithCapabilities",
+      args: [state, onchainAuthorization(authorizationA), onchainAuthorization(authorizationB)],
+    });
+
+    button.textContent = "Confirm in wallet…";
+    toast("Confirm the final on-chain settlement in your wallet.");
+    const hash = await sendContract(config.manager, data);
+    log(`Settled channel ${short(state.channelId)} on Tempo at nonce ${state.nonce}: ${short(hash)}.`, "channel");
+    $("settlementNonce").textContent = state.nonce.toString();
+    $("settlementPayoutA").textContent = formatPathUsd(state.balanceA);
+    $("settlementPayoutB").textContent = formatPathUsd(state.balanceB);
+    const transactionLink = $("settlementTx") as HTMLAnchorElement;
+    transactionLink.href = `${config.explorerUrl}/tx/${hash}`;
+    ($("channelDialog") as HTMLDialogElement).close();
+    ($("settlementDialog") as HTMLDialogElement).showModal();
+    toast("Settlement confirmed on Tempo. Final balances were paid out.");
+    void waitForSettlementIndex(state.channelId).catch(() => undefined);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Settle on Tempo";
+  }
+}
+
 async function openChannel(event: SubmitEvent): Promise<void> {
   event.preventDefault();
   if (!address) return;
@@ -955,6 +1071,9 @@ $("detailAgent").addEventListener("click", () => {
   ($("agentChannel") as HTMLSelectElement).value = channelId;
   ($("channelDialog") as HTMLDialogElement).close();
   ($("agentDialog") as HTMLDialogElement).showModal();
+});
+$("settleChannel").addEventListener("click", () => {
+  void settleActiveChannel().catch((error) => toast(String((error as Error).message ?? error), true));
 });
 renderChannels(); renderAgents(); renderActivity();
 const closeClients = () => { relay?.close(); for (const agent of agents) agent.client.close(); };

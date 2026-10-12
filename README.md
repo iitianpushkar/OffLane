@@ -271,6 +271,13 @@ encrypted request/response payloads, and commits two mutually authorized
 off-chain states. It rejects non-Moderato credentials and never submits an
 on-chain transaction.
 
+To finish the lifecycle on-chain, return to either participant's dashboard,
+refresh and open the channel, then select **Settle on Tempo**. The dashboard
+loads the relay's latest mutually authorized state and submits a capability-aware
+cooperative close. After wallet confirmation it shows the final nonce, both
+PathUSD payouts, and a Tempo explorer link; the channel disappears once the
+relay indexes the settlement.
+
 > The current A2A task and result are scripted to demonstrate the transport,
 > encryption, authorization, and payment flow. An LLM is not making autonomous
 > decisions yet.

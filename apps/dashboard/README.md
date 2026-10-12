@@ -46,6 +46,13 @@ Use two browser profiles so each participant can connect a different wallet:
    and accepts or rejects the proposal.
 6. After acceptance, both workspaces show the new nonce and balances. Repeat
    from the other wallet to test the reverse direction.
+7. When the exchange is complete, either participant opens the channel and
+   selects **Settle on Tempo**. Confirm the wallet transaction to close the
+   channel and pay the latest mutually signed balances back to both wallets.
+
+The settlement result displays the final state nonce, both PathUSD payouts,
+and the confirmed transaction link. The relay removes the channel from the
+dashboard after it indexes the on-chain `ChannelSettled` event.
 
 Messaging private keys are generated in the browser and stored in that
 profile's local storage. The relay stores the wallet-signed public-key
