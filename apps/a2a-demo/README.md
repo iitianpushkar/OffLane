@@ -5,12 +5,20 @@ dashboard. It validates their wallet signatures and channel relationship,
 authenticates both delegated agents with the relay, exchanges encrypted A2A
 messages, and commits one payment in each direction.
 
-Both participants must export credentials for the same open channel. Keep the
-relay running, build the workspace, and invoke the demo from the repository
-root:
+Both participants must export credentials for the same open channel. When each
+participant selects **Download JSON** in the local dashboard, the dashboard
+also saves role-based copies as `credentials/agent-a.json` and
+`credentials/agent-b.json`. Keep the relay running, build the workspace, and
+invoke the demo from the repository root without file arguments:
 
 ```bash
 pnpm build
+pnpm a2a
+```
+
+Explicit credential paths remain supported:
+
+```bash
 pnpm a2a -- ~/Downloads/offlane-agent-alice.json ~/Downloads/offlane-agent-bob.json
 ```
 

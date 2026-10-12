@@ -759,8 +759,9 @@ function showAgentExport(agent: AuthorizedAgent): void {
   if (!dialog.open) dialog.showModal();
 }
 
-function downloadAgentCredentials(agent: AuthorizedAgent): void {
-  const blob = new Blob([agentCredentialsJson(agent)], { type: "application/json" });
+async function downloadAgentCredentials(agent: AuthorizedAgent): Promise<void> {
+  const credentialsJson = agentCredentialsJson(agent);
+  const blob = new Blob([credentialsJson], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -769,8 +770,23 @@ function downloadAgentCredentials(agent: AuthorizedAgent): void {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
-  log(`Exported credentials for agent ${short(agent.address)}.`, "agent");
-  toast("Agent credentials downloaded. Keep the file private.");
+
+  const response = await fetch("/api/agent-credentials", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: credentialsJson,
+  });
+  const result = await response.json() as { path?: string; error?: string };
+  if (response.status === 403) {
+    log(`Downloaded credentials for agent ${short(agent.address)}.`, "agent");
+    toast("Credentials downloaded. Local A2A auto-save is unavailable on this deployment.");
+    return;
+  }
+  if (!response.ok || !result.path) {
+    throw new Error(result.error ?? "Credential downloaded, but the local A2A copy could not be saved.");
+  }
+  log(`Exported credentials for agent ${short(agent.address)} and saved ${result.path}.`, "agent");
+  toast(`Downloaded and saved ${agent.credentials.channel.participantRole} credentials for pnpm a2a.`);
 }
 
 function renderActivity(): void {
@@ -1041,7 +1057,10 @@ $("copyAgentCredentials").addEventListener("click", () => {
     .catch((error) => toast(String((error as Error).message ?? error), true));
 });
 $("downloadAgentCredentials").addEventListener("click", () => {
-  if (selectedAgentExport) downloadAgentCredentials(selectedAgentExport);
+  if (selectedAgentExport) {
+    void downloadAgentCredentials(selectedAgentExport)
+      .catch((error) => toast(String((error as Error).message ?? error), true));
+  }
 });
 $("sendPaymentForm").addEventListener("submit", (event) => proposePayment(event as SubmitEvent).catch((error) => toast(String((error as Error).message ?? error), true)));
 $("refreshPeerKey").addEventListener("click", () => {

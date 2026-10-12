@@ -73,6 +73,13 @@ then displays and downloads an `offlane-agent-*.json` file containing the
 delegated signer, signed channel capability, wallet-certified messaging key,
 and Moderato connection details an external agent needs.
 
+During local development, **Download JSON** also saves participant A as
+`apps/a2a-demo/credentials/agent-a.json` and participant B as
+`apps/a2a-demo/credentials/agent-b.json`. After both exports, run `pnpm a2a`
+from the repository root. These generated files are ignored by Git. Automatic
+server-side saving is disabled on Vercel, where the normal browser download
+still works.
+
 This MVP export is plaintext and intended only for disposable Tempo Moderato
 credentials. It never includes the connected wallet's private key. The
 generated agent remains available for another export only while the current

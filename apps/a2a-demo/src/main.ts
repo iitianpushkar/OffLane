@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import {
   channelCapabilityTypes,
   channelCapabilityWireSchema,
@@ -324,9 +325,13 @@ function assertPair(first: AgentCredentials, second: AgentCredentials): [AgentCr
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args[0] === "--") args.shift();
-  const [firstPath, secondPath, aToBInput = "0.10", bToAInput = "0.05"] = args;
-  if (!firstPath || !secondPath) {
-    throw new Error("usage: pnpm a2a -- <agent-a.json> <agent-b.json> [a-to-b PathUSD] [b-to-a PathUSD]");
+  let [firstPath, secondPath, aToBInput = "0.10", bToAInput = "0.05"] = args;
+  if (args.length === 0) {
+    firstPath = fileURLToPath(new URL("../credentials/agent-a.json", import.meta.url));
+    secondPath = fileURLToPath(new URL("../credentials/agent-b.json", import.meta.url));
+    console.log("Using dashboard-saved credentials from apps/a2a-demo/credentials.");
+  } else if (!firstPath || !secondPath) {
+    throw new Error("usage: pnpm a2a [-- <agent-a.json> <agent-b.json> [a-to-b PathUSD] [b-to-a PathUSD]]");
   }
   const [first, second] = await Promise.all([readCredentials(firstPath), readCredentials(secondPath)]);
   const [agentA, agentB] = assertPair(first, second);

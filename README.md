@@ -249,13 +249,19 @@ From each participant's browser profile:
 4. Approve the capability signature.
 5. Download the generated agent credential JSON.
 
-Keep the relay running and pass both files to the simulator:
+Keep the relay running and start the simulator:
 
 ```bash
 pnpm build
-pnpm a2a -- \
-  ~/Downloads/offlane-agent-alice.json \
-  ~/Downloads/offlane-agent-bob.json
+pnpm a2a
+```
+
+On the local dashboard, **Download JSON** also saves the latest participant A
+and B exports to the A2A demo's ignored `credentials/` directory, which the
+command above reads automatically. You can still provide explicit files:
+
+```bash
+pnpm a2a -- alice.json bob.json
 ```
 
 The defaults transfer `0.10` PathUSD from A to B and `0.05` PathUSD from B to
